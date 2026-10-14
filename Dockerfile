@@ -1,0 +1,40 @@
+# 多阶段构建：Alpine 静态编译 → 极小运行镜像
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /src
+COPY go.mod ./
+RUN go mod download
+COPY . .
+
+ARG VERSION=docker
+RUN CGO_ENABLED=0 GOOS=linux go build \
+        -trimpath \
+        -ldflags="-s -w -X main.version=${VERSION}" \
+        -o /out/txt2html .
+
+FROM alpine:3.20
+
+# ca-certificates 供未来的 HTTPS 上游使用；tzdata 让日志时间戳可读
+RUN apk add --no-cache ca-certificates tzdata \
+    && adduser -D -u 10001 -h /data app
+
+COPY --from=builder /out/txt2html /usr/local/bin/txt2html
+
+# 容器内必须监听所有网卡，否则宿主映射进来的端口连不上
+ENV LISTEN_HOST=0.0.0.0 \
+    PAGE_PORT=18899 \
+    PROXY1_PORT=18898 \
+    COOKIE_FILE=/data/cookie_115.txt \
+    NO_BROWSER=1 \
+    NO_PROMPT=1
+
+WORKDIR /data
+VOLUME ["/data"]
+USER 10001
+
+EXPOSE 18899 18898
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget -q -O /dev/null "http://127.0.0.1:${PAGE_PORT:-18899}/healthz" || exit 1
+
+ENTRYPOINT ["/usr/local/bin/txt2html"]

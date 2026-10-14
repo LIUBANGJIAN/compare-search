@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>双引擎搜索</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            background-color: #f4f6f8;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            min-height: calc(100vh - 40px);
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 18px 22px 22px;
+            background: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+        }
+        .searchbar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        #kwInput {
+            flex: 1 1 420px;
+            min-height: 44px;
+            max-height: 140px;
+            padding: 10px 12px;
+            font: inherit;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            color: #1f2937;
+            background: #fff;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            resize: vertical;
+            outline: none;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        #kwInput:focus {
+            border-color: #0066cc;
+            box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.12);
+        }
+        .btn-primary {
+            padding: 11px 20px;
+            font: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #fff;
+            background-color: #0066cc;
+            border: 1px solid #0066cc;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.2s ease, border-color 0.2s ease;
+        }
+        .btn-primary:hover { background-color: #0055aa; border-color: #0055aa; }
+        .pager {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+            padding: 8px 12px;
+            font-size: 0.85rem;
+            color: #334155;
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+        }
+        .pager[hidden] { display: none; }
+        .pager button {
+            padding: 5px 12px;
+            font: inherit;
+            font-size: 0.82rem;
+            color: #334155;
+            background-color: #fff;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .pager button:hover:not(:disabled) {
+            color: #0066cc;
+            border-color: #0066cc;
+            background-color: #ebf5ff;
+        }
+        .pager button:disabled { opacity: 0.45; cursor: not-allowed; }
+        .pager-info { font-variant-numeric: tabular-nums; color: #64748b; }
+        .pager-kw { color: #64748b; word-break: break-all; }
+        .pager-kw b { color: #0f172a; }
+        .layout {
+            flex: 1;
+            display: flex;
+            gap: 15px;
+            min-height: 520px;
+        }
+        .results-col {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            min-width: 0;
+        }
+        .panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #fff;
+        }
+        .panel-header {
+            padding: 8px 12px;
+            background-color: #f8fafc;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #334155;
+        }
+        .panel iframe {
+            flex: 1;
+            width: 100%;
+            border: 0;
+            background: #fff;
+        }
+        .codes-col {
+            flex: 0 0 320px;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #fff;
+        }
+        .codes-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background-color: #f8fafc;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #334155;
+        }
+        .clear-btn {
+            padding: 4px 10px;
+            font: inherit;
+            font-size: 0.8rem;
+            color: #334155;
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .clear-btn:hover {
+            background-color: #ebf5ff;
+            border-color: #0066cc;
+            color: #0066cc;
+        }
+        .list-box {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .list-empty {
+            padding: 12px;
+            color: #94a3b8;
+            font-size: 0.85rem;
+            line-height: 1.6;
+        }
+        .data-line {
+            display: block;
+            padding: 8px 12px;
+            color: #0066cc;
+            text-decoration: none;
+            border-radius: 4px;
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            transition: all 0.2s ease;
+            word-break: break-all;
+            cursor: pointer;
+        }
+        .data-line:hover {
+            background-color: #ebf5ff;
+            border-color: #0066cc;
+            transform: translateX(3px);
+        }
+        .data-line.clicked {
+            color: #dc2626 !important;
+            border-color: #fca5a5;
+            background-color: #fef2f2;
+        }
+    </style>
+</head>
+<body data-p1-port="{P1PORT}">
+    <div class="container">
+        <div class="searchbar">
+            <textarea id="kwInput" spellcheck="false"
+                placeholder="输入关键字后点「同时搜索」：可填多个关键字，用空格 / 逗号 / 分号 / 换行分隔。快捷键 Ctrl+Enter 搜索，Alt+← / Alt+→ 翻页"></textarea>
+            <button id="searchBtn" class="btn-primary" type="button">同时搜索</button>
+        </div>
+
+        <div class="pager" id="pager" hidden>
+            <button id="prevBtn" type="button">← 上一个</button>
+            <span class="pager-info" id="pagerInfo">1 / 1</span>
+            <button id="nextBtn" type="button">下一个 →</button>
+            <span class="pager-kw">当前关键字：<b id="pagerKw"></b></span>
+        </div>
+
+        <div class="layout">
+            <div class="results-col">
+                <div class="panel">
+                    <div class="panel-header">搜索结果1</div>
+                    <iframe id="frame1" src="about:blank"></iframe>
+                </div>
+                <div class="panel">
+                    <div class="panel-header">搜索结果2</div>
+                    <iframe id="frame2" src="about:blank"></iframe>
+                </div>
+            </div>
+            <div class="codes-col">
+                <div class="codes-header">
+                    <span>番号</span>
+                    <button class="clear-btn" id="clearBtn" type="button">清空结果</button>
+                </div>
+                <div class="list-box">
+{ITEMS}
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+{SCRIPT}
+    </script>
+</body>
+</html>

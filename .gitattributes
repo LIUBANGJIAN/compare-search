@@ -1,0 +1,13 @@
+# 统一按 LF 入库：Windows 上带 CRLF 的 shell 脚本在 Linux runner 上会
+# 满屏 "\r: command not found"，而脚本又没有 set -e，会安静地变成「空转的绿」。
+* text=auto eol=lf
+*.go    text eol=lf
+*.js    text eol=lf
+*.py    text eol=lf
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.html  text eol=lf
+Dockerfile text eol=lf
+
+*.exe   binary

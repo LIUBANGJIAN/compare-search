@@ -1,0 +1,21 @@
+.git
+.github
+.gitignore
+.gitattributes
+
+# 本地构建产物
+txt2html
+txt2html.exe
+*.exe
+
+# 本地配置与状态
+config.env
+cookie_115.txt
+
+# 测试与本地验证脚手架（镜像里用不到）
+*_test.go
+scripts/
+web/panel.test.js
+
+# 文档
+*.md

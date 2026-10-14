@@ -1,0 +1,25 @@
+# 本地配置与运行状态（可能含真实内网地址、登录 Cookie，绝不入库）
+config.env
+cookie_115.txt
+
+# 工作区自身的元数据目录
+.workbuddy/
+
+# 构建产物
+txt2html
+txt2html.exe
+*.exe
+/out/
+
+# 本地验证脚手架
+.probe/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Python 编译缓存
+__pycache__/
+*.pyc
