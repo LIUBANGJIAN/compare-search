@@ -10,6 +10,7 @@ txt2html.exe
 
 # 本地配置与状态
 config.env
+settings.json
 cookie_115.txt
 
 # 测试与本地验证脚手架（镜像里用不到）

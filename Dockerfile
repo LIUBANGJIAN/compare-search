@@ -21,10 +21,12 @@ RUN apk add --no-cache ca-certificates tzdata \
 COPY --from=builder /out/txt2html /usr/local/bin/txt2html
 
 # 容器内必须监听所有网卡，否则宿主映射进来的端口连不上
+# 数据文件统一放在 /data（声明为 VOLUME，便于挂载持久化）
 ENV LISTEN_HOST=0.0.0.0 \
     PAGE_PORT=18899 \
     PROXY1_PORT=18898 \
     COOKIE_FILE=/data/cookie_115.txt \
+    CONFIG_FILE=/data/settings.json \
     NO_BROWSER=1 \
     NO_PROMPT=1
 

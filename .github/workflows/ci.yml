@@ -57,6 +57,9 @@ jobs:
       - name: 前端单元测试
         run: node web/panel.test.js
 
+      - name: 校验 docker-compose.yml 能被解析
+        run: docker compose -f docker-compose.yml config > /dev/null
+
   gate:
     name: 判定是否发布
     needs: test

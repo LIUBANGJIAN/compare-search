@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 冒烟测试：真的把服务跑起来，验证面板页与两条代理链路。
+# 冒烟测试：真的把服务跑起来，验证面板页、两条代理链路、以及配置接口与持久化。
 #
 #   ENGINE=docker IMAGE=<镜像> bash scripts/smoke.sh   # CI 默认（真跑镜像）
 #   ENGINE=local  BIN=./txt2html.exe bash scripts/smoke.sh
@@ -48,21 +48,32 @@ cleanup() {
         [ -n "$APP_PID" ] && kill "$APP_PID" >/dev/null 2>&1
     fi
     [ -n "$MOCK_PID" ] && kill "$MOCK_PID" >/dev/null 2>&1
-    rm -rf "$WORKDIR"
     return 0
 }
 trap cleanup EXIT
 
 # Windows 上 Git Bash 的 /tmp 与原生程序看到的路径不是同一个位置，
 # 交给被测程序的文件路径要转成 Windows 形式（mock 脚本不需要）。
-COOKIE_PATH="$WORKDIR/cookie_115.txt"
-if command -v cygpath >/dev/null 2>&1; then
-    COOKIE_PATH="$(cygpath -w "$WORKDIR/cookie_115.txt")"
-fi
+to_native() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
+}
+COOKIE_PATH="$(to_native "$WORKDIR/cookie_115.txt")"
+CONFIG_PATH="$(to_native "$WORKDIR/settings.json")"
 
 PY="$(command -v python3 || command -v python)"
 if [ -z "$PY" ]; then
     echo "::error title=缺少 python::冒烟脚本需要 python3 来启动假上游"
+    exit 1
+fi
+
+# 预检端口：端口被别的进程占用时，被测服务会「安静地」退化到随机端口，
+# 于是 curl 打到的是那个进程、断言结果全是误导 —— 实测踩过一次。
+port_busy() {
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null || return 1
+    return 0
+}
+if port_busy "$PANEL_PORT" || port_busy "$PROXY_PORT"; then
+    echo "::error title=端口被占用::127.0.0.1:${PANEL_PORT} 或 :${PROXY_PORT} 上已有进程在监听，请先停掉再跑冒烟"
     exit 1
 fi
 
@@ -91,10 +102,19 @@ else
         PAGE_PORT="$PANEL_PORT" \
         PROXY1_PORT="$PROXY_PORT" \
         COOKIE_FILE="$COOKIE_PATH" \
+        CONFIG_FILE="$CONFIG_PATH" \
         NO_BROWSER=1 \
         "$BIN" >"$WORKDIR/app.log" 2>&1 &
     APP_PID=$!
 fi
+
+read_config_file() {
+    if [ "$ENGINE" = "docker" ]; then
+        docker exec "$CNAME" cat /data/settings.json 2>/dev/null
+    else
+        cat "$WORKDIR/settings.json" 2>/dev/null
+    fi
+}
 
 # ---------------------------------------------------------------------------
 # 就绪探测与健康检查
@@ -146,7 +166,8 @@ note "面板页"
 curl -s --max-time 5 "$PANEL/" >"$WORKDIR/page.html"
 PAGE="$(cat "$WORKDIR/page.html")"
 
-for id in kwInput searchBtn pager pagerInfo pagerKw prevBtn nextBtn frame1 frame2 clearBtn; do
+for id in kwInput searchBtn settingsBtn pager pagerInfo pagerKw prevBtn nextBtn \
+    frame1 frame2 clearBtn listBox codesToggle splitter settingsDialog; do
     case "$PAGE" in
         *"id=\"$id\""*) pass "面板页含 #$id" ;;
         *) fail "面板页缺少 #$id" ;;
@@ -159,7 +180,7 @@ case "$PAGE" in
 esac
 
 case "$PAGE" in
-    *'{P1PORT}'* | *'{ITEMS}'* | *'{SCRIPT}'*) fail "面板页残留未替换的占位符" ;;
+    *'{P1PORT}'* | *'{BOOTSTRAP}'* | *'{SCRIPT}'*) fail "面板页残留未替换的占位符" ;;
     *) pass "面板页占位符已全部替换" ;;
 esac
 
@@ -169,8 +190,13 @@ case "$PAGE" in
 esac
 
 case "$PAGE" in
-    *list-empty*) pass "未提供 txt 时给出列表占位提示" ;;
-    *) fail "未提供 txt 时缺少列表占位提示" ;;
+    *'id="bootstrap"'*'"items"'*) pass "面板页下发了番号引导数据" ;;
+    *) fail "面板页未下发番号引导数据" ;;
+esac
+
+case "$PAGE" in
+    *'"source1"'*'"source2"'*) pass "面板页下发了当前上游地址" ;;
+    *) fail "面板页未下发当前上游地址" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -226,11 +252,76 @@ case "$B1" in
 esac
 
 # ---------------------------------------------------------------------------
+# 配置接口：读取 / 跨站拒绝 / 校验 / 保存 / 热切换 / 持久化
+# 注意放在代理断言之后 —— 它会改掉上游地址。
+# ---------------------------------------------------------------------------
+note "配置接口"
+
+CFG="$(curl -s --max-time 5 "$PANEL/api/config")"
+case "$CFG" in
+    *'"source1"'*'"source2"'*) pass "GET /api/config 返回两个上游地址" ;;
+    *) fail "GET /api/config 响应不正确（实际：$(head -c 200 <<<"$CFG")）" ;;
+esac
+case "$CFG" in
+    *"$S1_BASE"*) pass "GET /api/config 与启动时的源1 地址一致" ;;
+    *) fail "GET /api/config 源1 地址与启动参数不一致（实际：$(head -c 200 <<<"$CFG")）" ;;
+esac
+
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+    -H 'Content-Type: application/json' -H 'Origin: http://evil.example' \
+    -d '{"source1":"http://192.0.2.99:1","source2":"http://192.0.2.99:2"}' \
+    "$PANEL/api/config")"
+if [ "$CODE" = "403" ]; then
+    pass "跨站 Origin 的写入被拒绝（403）"
+else
+    fail "跨站 Origin 的写入未被拒绝（实际 HTTP $CODE）"
+fi
+
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"source1":"ftp://bad","source2":"http://192.0.2.20:8787"}' \
+    "$PANEL/api/config")"
+if [ "$CODE" = "400" ]; then
+    pass "非法地址被拒绝（400）"
+else
+    fail "非法地址未被拒绝（实际 HTTP $CODE）"
+fi
+
+# 真实保存：把源1 指向另一个假上游端口，验证热切换
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+    -H 'Content-Type: application/json' \
+    -d "{\"source1\":\"$S2_BASE\",\"source2\":\"$S2_BASE\"}" \
+    "$PANEL/api/config")"
+if [ "$CODE" = "200" ]; then
+    pass "合法配置保存成功（200）"
+else
+    fail "合法配置保存失败（实际 HTTP $CODE）"
+fi
+
+curl -s --max-time 5 "$PANEL/healthz" >"$WORKDIR/health2.json"
+case "$(cat "$WORKDIR/health2.json")" in
+    *"$S2_BASE"*) pass "/healthz 反映出新地址（配置已生效）" ;;
+    *) fail "/healthz 未反映新地址（实际：$(head -c 200 "$WORKDIR/health2.json")）" ;;
+esac
+
+curl -s --max-time 5 "$PROXY1/files?q=abc" >"$WORKDIR/b1b.html"
+case "$(cat "$WORKDIR/b1b.html")" in
+    *"MOCK-UPSTREAM-$SRC2_PORT"*) pass "源1 代理已热切换到新上游（无需重启）" ;;
+    *) fail "源1 代理未热切换（实际：$(head -c 200 "$WORKDIR/b1b.html")）" ;;
+esac
+
+if read_config_file | grep -q "$S2_BASE"; then
+    pass "配置已落盘，重启后仍生效（持久化）"
+else
+    fail "配置文件未落盘或内容不正确"
+fi
+
+# ---------------------------------------------------------------------------
 # 汇总
 # ---------------------------------------------------------------------------
 # 断言计数下限：不使用 set -e 的脚本，「半途没跑起来」与「全部通过」退出码都是 0，
 # 这条锁专堵那种空转的绿。取实际条数的一半左右并留富余，别贴着实际值。
-MIN_CHECKS=18
+MIN_CHECKS=20
 if [ "$CHECKS" -lt "$MIN_CHECKS" ]; then
     echo "::error title=断言数异常::只执行了 ${CHECKS} 条，低于下限 ${MIN_CHECKS}"
     exit 1

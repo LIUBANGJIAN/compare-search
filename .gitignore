@@ -1,5 +1,6 @@
 # 本地配置与运行状态（可能含真实内网地址、登录 Cookie，绝不入库）
 config.env
+settings.json
 cookie_115.txt
 
 # 工作区自身的元数据目录
@@ -23,3 +24,7 @@ txt2html.exe
 # Python 编译缓存
 __pycache__/
 *.pyc
+
+# 编辑器/工具留下的临时文件
+*~
+*.tmp
