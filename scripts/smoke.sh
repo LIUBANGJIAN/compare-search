@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 冒烟测试：真的把服务跑起来，验证面板页、两条代理链路、以及配置接口与持久化。
+# 冒烟测试：真的把服务跑起来，验证面板页、每个引擎的代理链路、配置接口与 URL 直达检索。
 #
 #   ENGINE=docker IMAGE=<镜像> bash scripts/smoke.sh   # CI 默认（真跑镜像）
 #   ENGINE=local  BIN=./compare-search.exe bash scripts/smoke.sh
@@ -21,14 +21,12 @@ else
 fi
 
 PANEL_PORT="${PANEL_PORT:-18899}"
-PROXY_PORT="${PROXY_PORT:-18898}"
+PROXY_PORT_BASE="${PROXY_PORT_BASE:-18898}"
 SRC1_PORT="${SRC1_PORT:-11510}"
 SRC2_PORT="${SRC2_PORT:-8787}"
-
-S1_BASE="http://${UPSTREAM_HOST}:${SRC1_PORT}"
-S2_BASE="http://${UPSTREAM_HOST}:${SRC2_PORT}"
+SRC1_BASE="http://${UPSTREAM_HOST}:${SRC1_PORT}"
+SRC2_BASE="http://${UPSTREAM_HOST}:${SRC2_PORT}"
 PANEL="http://127.0.0.1:${PANEL_PORT}"
-PROXY1="http://127.0.0.1:${PROXY_PORT}"
 
 WORKDIR="$(mktemp -d)"
 CNAME="t2h-smoke-$$"
@@ -62,7 +60,7 @@ CONFIG_PATH="$(to_native "$WORKDIR/settings.json")"
 
 PY="$(command -v python3 || command -v python)"
 if [ -z "$PY" ]; then
-    echo "::error title=缺少 python::冒烟脚本需要 python3 来启动假上游"
+    echo "::error title=缺少 python::冒烟脚本需要 python3 来启动假上游与解析 JSON"
     exit 1
 fi
 
@@ -72,10 +70,15 @@ port_busy() {
     (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null || return 1
     return 0
 }
-if port_busy "$PANEL_PORT" || port_busy "$PROXY_PORT"; then
-    echo "::error title=端口被占用::127.0.0.1:${PANEL_PORT} 或 :${PROXY_PORT} 上已有进程在监听，请先停掉再跑冒烟"
+if port_busy "$PANEL_PORT" || port_busy "$PROXY_PORT_BASE"; then
+    echo "::error title=端口被占用::127.0.0.1:${PANEL_PORT} 或 :${PROXY_PORT_BASE} 上已有进程在监听，请先停掉再跑冒烟"
     exit 1
 fi
+
+# json_field <json 文本> <python 表达式，d 为解析后的对象>
+json_field() {
+    printf '%s' "$1" | "$PY" -c "import json,sys;d=json.load(sys.stdin);print($2)" 2>/dev/null
+}
 
 note "启动假上游 (:$SRC1_PORT / :$SRC2_PORT)"
 MOCK_UPSTREAM_HOST="$UPSTREAM_HOST" "$PY" scripts/mock_upstream.py "$SRC1_PORT" "$SRC2_PORT" \
@@ -90,17 +93,17 @@ note "启动被测服务（ENGINE=$ENGINE）"
 if [ "$ENGINE" = "docker" ]; then
     docker run -d --name "$CNAME" \
         --add-host=host.docker.internal:host-gateway \
-        -e SRC1_BASE="$S1_BASE" \
-        -e SRC2_BASE="$S2_BASE" \
+        -e SRC1_BASE="$SRC1_BASE" \
+        -e SRC2_BASE="$SRC2_BASE" \
         -p "127.0.0.1:${PANEL_PORT}:${PANEL_PORT}" \
-        -p "127.0.0.1:${PROXY_PORT}:${PROXY_PORT}" \
+        -p "127.0.0.1:${PROXY_PORT_BASE}:${PROXY_PORT_BASE}" \
         "$IMAGE" >/dev/null 2>&1
 else
-    SRC1_BASE="$S1_BASE" \
-        SRC2_BASE="$S2_BASE" \
+    SRC1_BASE="$SRC1_BASE" \
+        SRC2_BASE="$SRC2_BASE" \
         LISTEN_HOST=127.0.0.1 \
         PAGE_PORT="$PANEL_PORT" \
-        PROXY1_PORT="$PROXY_PORT" \
+        PROXY_PORT_BASE="$PROXY_PORT_BASE" \
         COOKIE_FILE="$COOKIE_PATH" \
         CONFIG_FILE="$CONFIG_PATH" \
         NO_BROWSER=1 \
@@ -117,7 +120,7 @@ read_config_file() {
 }
 
 # ---------------------------------------------------------------------------
-# 就绪探测与健康检查
+# 健康检查（引擎列表与端口分配都在这里）
 # ---------------------------------------------------------------------------
 note "健康检查"
 READY=0
@@ -130,18 +133,23 @@ for _ in $(seq 1 60); do
 done
 
 VER=""
+E1_PORT=""
+E2_PORT=""
+E1_NAME=""
+E2_NAME=""
 if [ "$READY" = "1" ]; then
+    HEALTH="$(cat "$WORKDIR/health.json")"
     pass "服务已就绪，/healthz 返回 200"
-    if grep -q '"status":"ok"' "$WORKDIR/health.json"; then
+    if printf '%s' "$HEALTH" | grep -q '"status":"ok"'; then
         pass "/healthz 报告 status=ok"
     else
         fail "/healthz 未报告 status=ok（实际：$(head -c 200 "$WORKDIR/health.json")）"
     fi
-    VER="$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$WORKDIR/health.json")"
+    VER="$(json_field "$HEALTH" "d['version']")"
     if [ -n "$VER" ]; then
         pass "服务自报版本：$VER"
     else
-        fail "服务未自报版本（实际：$(head -c 200 "$WORKDIR/health.json")）"
+        fail "服务未自报版本"
     fi
     if [ -n "${EXPECT_VERSION:-}" ]; then
         if [ "$VER" = "$EXPECT_VERSION" ]; then
@@ -149,6 +157,27 @@ if [ "$READY" = "1" ]; then
         else
             fail "自报版本 ${VER:-空} 与期望 ${EXPECT_VERSION} 不一致"
         fi
+    fi
+
+    NENG="$(json_field "$HEALTH" "len(d['engines'])")"
+    if [ "$NENG" = "2" ]; then
+        pass "/healthz 报告 2 个搜索引擎"
+    else
+        fail "/healthz 里的引擎数不正确（实际 ${NENG:-空}）"
+    fi
+    E1_NAME="$(json_field "$HEALTH" "d['engines'][0]['name']")"
+    E2_NAME="$(json_field "$HEALTH" "d['engines'][1]['name']")"
+    E1_PORT="$(json_field "$HEALTH" "d['engines'][0]['proxyPort']")"
+    E2_PORT="$(json_field "$HEALTH" "d['engines'][1]['proxyPort']")"
+    if [ -n "$E1_NAME" ] && [ -n "$E2_NAME" ]; then
+        pass "引擎名已下发：$E1_NAME / $E2_NAME"
+    else
+        fail "引擎名缺失"
+    fi
+    if [ -n "$E1_PORT" ] && [ "$E1_PORT" != "0" ] && [ -n "$E2_PORT" ] && [ "$E2_PORT" != "0" ]; then
+        pass "每个引擎都分到了代理端口：$E1_PORT / $E2_PORT"
+    else
+        fail "引擎代理端口分配失败（$E1_PORT / $E2_PORT）"
     fi
 else
     fail "服务未在超时内就绪"
@@ -160,6 +189,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 配置文件自动生成（首次启动就该有，不用等用户点保存）
+# ---------------------------------------------------------------------------
+note "配置文件自动生成"
+if read_config_file | grep -q '"engines"'; then
+    pass "首次启动即自动生成了配置文件（含 engines）"
+else
+    fail "配置文件未自动生成（实际：$(read_config_file | head -c 200)）"
+fi
+
+# ---------------------------------------------------------------------------
 # 面板页
 # ---------------------------------------------------------------------------
 note "面板页"
@@ -167,7 +206,7 @@ curl -s --max-time 5 "$PANEL/" >"$WORKDIR/page.html"
 PAGE="$(cat "$WORKDIR/page.html")"
 
 for id in kwInput searchBtn settingsBtn pager pagerInfo pagerKw prevBtn nextBtn \
-    frame1 frame2 clearBtn listBox codesToggle splitter settingsDialog; do
+    clearBtn listBox codesToggle splitter settingsDialog engineList addEngineBtn resultsCol; do
     case "$PAGE" in
         *"id=\"$id\""*) pass "面板页含 #$id" ;;
         *) fail "面板页缺少 #$id" ;;
@@ -175,101 +214,124 @@ for id in kwInput searchBtn settingsBtn pager pagerInfo pagerKw prevBtn nextBtn 
 done
 
 case "$PAGE" in
-    *"data-p1-port=\"$PROXY_PORT\""*) pass "面板页注入了源1 端口 $PROXY_PORT" ;;
-    *) fail "面板页未注入源1 端口" ;;
-esac
-
-case "$PAGE" in
-    *'{P1PORT}'* | *'{BOOTSTRAP}'* | *'{SCRIPT}'*) fail "面板页残留未替换的占位符" ;;
+    *'{SCRIPT}'* | *'{BOOTSTRAP}'* | *'{P1PORT}'*) fail "面板页残留未替换的占位符" ;;
     *) pass "面板页占位符已全部替换" ;;
 esac
-
 case "$PAGE" in
     *splitKeywords*) pass "面板页已内联前端脚本" ;;
     *) fail "面板页未内联前端脚本" ;;
 esac
-
 case "$PAGE" in
     *'id="bootstrap"'*'"items"'*) pass "面板页下发了番号引导数据" ;;
     *) fail "面板页未下发番号引导数据" ;;
 esac
-
 case "$PAGE" in
-    *'"source1"'*'"source2"'*) pass "面板页下发了当前上游地址" ;;
-    *) fail "面板页未下发当前上游地址" ;;
+    *'"proxyPort"'*) pass "面板页下发了各引擎的代理端口" ;;
+    *) fail "面板页未下发引擎代理端口" ;;
 esac
+# 番号栏能滚动的前提是外层高度固定：容器用固定 height，flex 子项 min-height:0，
+# 否则番号一多就把整页撑长（用户反馈过的问题）。这两条是防回退的护栏。
+case "$PAGE" in
+    *'height: calc(100vh'*) pass "外层容器高度固定（番号栏才能内部滚动）" ;;
+    *) fail "外层容器未固定高度，番号多时会把页面撑长" ;;
+esac
+case "$PAGE" in
+    *'min-height: 0'*) pass "flex 子项允许收缩（min-height: 0）" ;;
+    *) fail "flex 子项缺少 min-height: 0，番号栏无法滚动" ;;
+esac
+if [ -n "$E1_NAME" ]; then
+    case "$PAGE" in
+        *"$E1_NAME"*) pass "结果面板标题使用引擎名（$E1_NAME）" ;;
+        *) fail "结果面板标题未使用引擎名" ;;
+    esac
+fi
 
 # ---------------------------------------------------------------------------
-# 代理链路（源2 走面板页同源路径）
+# 每个引擎各自的代理链路
 # ---------------------------------------------------------------------------
-note "源2 代理（同源路径 /s）"
-curl -s --max-time 5 -D "$WORKDIR/h2.txt" "$PANEL/s?q=abc" >"$WORKDIR/b2.html"
-B2="$(cat "$WORKDIR/b2.html")"
+check_engine_proxy() {
+    local label="$1" port="$2" path="$3" marker="$4"
+    note "$label（端口 $port，路径 $path）"
+    if [ -z "$port" ] || [ "$port" = "0" ]; then
+        fail "$label 没有可用端口"
+        return
+    fi
+    curl -s --max-time 5 -D "$WORKDIR/h.txt" "http://127.0.0.1:${port}${path}?q=abc" >"$WORKDIR/b.html"
+    local body
+    body="$(cat "$WORKDIR/b.html")"
 
-grep -qi '^x-frame-options:' "$WORKDIR/h2.txt" \
-    && fail "源2 响应仍带 X-Frame-Options" \
-    || pass "源2 已剥离 X-Frame-Options"
-grep -qi '^content-security-policy:' "$WORKDIR/h2.txt" \
-    && fail "源2 响应仍带 Content-Security-Policy" \
-    || pass "源2 已剥离 Content-Security-Policy"
-case "$B2" in
-    *data-local-inject*) pass "源2 已注入隐藏外壳样式" ;;
-    *) fail "源2 未注入隐藏外壳样式" ;;
-esac
-case "$B2" in
-    *"MOCK-UPSTREAM-$SRC2_PORT"*) pass "源2 代理链路可达上游" ;;
-    *) fail "源2 代理未取到上游内容（实际：$(head -c 200 "$WORKDIR/b2.html")）" ;;
-esac
-case "$B2" in
-    *"$UPSTREAM_HOST"*) fail "源2 正文仍含上游绝对地址" ;;
-    *) pass "源2 绝对地址已改写为相对" ;;
-esac
+    grep -qi '^x-frame-options:' "$WORKDIR/h.txt" \
+        && fail "$label 响应仍带 X-Frame-Options" \
+        || pass "$label 已剥离 X-Frame-Options"
+    grep -qi '^content-security-policy:' "$WORKDIR/h.txt" \
+        && fail "$label 响应仍带 Content-Security-Policy" \
+        || pass "$label 已剥离 Content-Security-Policy"
+    case "$body" in
+        *data-local-inject*) pass "$label 已注入隐藏外壳样式" ;;
+        *) fail "$label 未注入隐藏外壳样式" ;;
+    esac
+    case "$body" in
+        *"$marker"*) pass "$label 代理链路可达上游" ;;
+        *) fail "$label 代理未取到上游内容（实际：$(head -c 200 "$WORKDIR/b.html")）" ;;
+    esac
+    case "$body" in
+        *"$UPSTREAM_HOST"*) fail "$label 正文仍含上游绝对地址" ;;
+        *) pass "$label 绝对地址已改写为相对" ;;
+    esac
+}
 
-# ---------------------------------------------------------------------------
-# 代理链路（源1 独立端口）
-# ---------------------------------------------------------------------------
-note "源1 代理（独立端口 /files）"
-curl -s --max-time 5 -D "$WORKDIR/h1.txt" "$PROXY1/files?q=abc" >"$WORKDIR/b1.html"
-B1="$(cat "$WORKDIR/b1.html")"
-
-grep -qi '^x-frame-options:' "$WORKDIR/h1.txt" \
-    && fail "源1 响应仍带 X-Frame-Options" \
-    || pass "源1 已剥离 X-Frame-Options"
-grep -qi '^content-security-policy:' "$WORKDIR/h1.txt" \
-    && fail "源1 响应仍带 Content-Security-Policy" \
-    || pass "源1 已剥离 Content-Security-Policy"
-case "$B1" in
-    *data-local-inject*) pass "源1 已注入隐藏外壳样式" ;;
-    *) fail "源1 未注入隐藏外壳样式" ;;
-esac
-case "$B1" in
-    *"MOCK-UPSTREAM-$SRC1_PORT"*) pass "源1 代理链路可达上游" ;;
-    *) fail "源1 代理未取到上游内容（实际：$(head -c 200 "$WORKDIR/b1.html")）" ;;
-esac
-case "$B1" in
-    *"$UPSTREAM_HOST"*) fail "源1 正文仍含上游绝对地址" ;;
-    *) pass "源1 绝对地址已改写为相对" ;;
-esac
+check_engine_proxy "引擎1 代理" "$E1_PORT" "/files" "MOCK-UPSTREAM-$SRC1_PORT"
+check_engine_proxy "引擎2 代理" "$E2_PORT" "/s" "MOCK-UPSTREAM-$SRC2_PORT"
 
 # ---------------------------------------------------------------------------
-# 配置接口：读取 / 跨站拒绝 / 校验 / 保存 / 热切换 / 持久化
-# 注意放在代理断言之后 —— 它会改掉上游地址。
+# URL 直达检索
+# ---------------------------------------------------------------------------
+note "URL 直达检索"
+
+SEARCH="$(curl -s --max-time 5 "$PANEL/api/search?q=abc")"
+if printf '%s' "$SEARCH" | grep -q '"keyword":"abc"'; then
+    pass "GET /api/search 返回关键字"
+else
+    fail "GET /api/search 响应不正确（实际：$(head -c 200 <<<"$SEARCH")）"
+fi
+if [ "$(json_field "$SEARCH" "len(d['engines'])")" = "2" ]; then
+    pass "GET /api/search 返回每个引擎的检索地址"
+else
+    fail "GET /api/search 引擎地址数量不正确"
+fi
+if [ "$(json_field "$SEARCH" "d['engines'][0]['url']")" = "http://127.0.0.1:${E1_PORT}/files?q=abc" ]; then
+    pass "检索地址用请求主机名 + 引擎端口拼装"
+else
+    fail "检索地址不正确（实际：$(json_field "$SEARCH" "d['engines'][0]['url']")）"
+fi
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$PANEL/api/search")"
+if [ "$CODE" = "400" ]; then
+    pass "GET /api/search 缺少 q 时返回 400"
+else
+    fail "GET /api/search 缺少 q 应返回 400（实际 $CODE）"
+fi
+if curl -s --max-time 5 "$PANEL/?q=abc" | grep -q '"q":"abc"'; then
+    pass "面板页 /?q=abc 把关键字带进了引导数据"
+else
+    fail "面板页未把 URL 里的关键字带进引导数据"
+fi
+
+# ---------------------------------------------------------------------------
+# 配置接口：读取 / 跨站拒绝 / 校验 / 增删引擎 / 热切换 / 持久化
+# 注意放在代理断言之后 —— 它会改掉引擎地址。
 # ---------------------------------------------------------------------------
 note "配置接口"
 
 CFG="$(curl -s --max-time 5 "$PANEL/api/config")"
-case "$CFG" in
-    *'"source1"'*'"source2"'*) pass "GET /api/config 返回两个上游地址" ;;
-    *) fail "GET /api/config 响应不正确（实际：$(head -c 200 <<<"$CFG")）" ;;
-esac
-case "$CFG" in
-    *"$S1_BASE"*) pass "GET /api/config 与启动时的源1 地址一致" ;;
-    *) fail "GET /api/config 源1 地址与启动参数不一致（实际：$(head -c 200 <<<"$CFG")）" ;;
-esac
+if [ "$(json_field "$CFG" "len(d['engines'])")" = "2" ]; then
+    pass "GET /api/config 返回引擎列表"
+else
+    fail "GET /api/config 响应不正确（实际：$(head -c 200 <<<"$CFG")）"
+fi
 
 CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
     -H 'Content-Type: application/json' -H 'Origin: http://evil.example' \
-    -d '{"source1":"http://192.0.2.99:1","source2":"http://192.0.2.99:2"}' \
+    -d '{"engines":[{"name":"x","base":"http://192.0.2.99:1","path":"/s"}]}' \
     "$PANEL/api/config")"
 if [ "$CODE" = "403" ]; then
     pass "跨站 Origin 的写入被拒绝（403）"
@@ -279,7 +341,7 @@ fi
 
 CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
     -H 'Content-Type: application/json' \
-    -d '{"source1":"ftp://bad","source2":"http://192.0.2.20:8787"}' \
+    -d '{"engines":[{"name":"x","base":"ftp://bad","path":"/s"}]}' \
     "$PANEL/api/config")"
 if [ "$CODE" = "400" ]; then
     pass "非法地址被拒绝（400）"
@@ -287,33 +349,50 @@ else
     fail "非法地址未被拒绝（实际 HTTP $CODE）"
 fi
 
-# 真实保存：把源1 指向另一个假上游端口，验证热切换
 CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
     -H 'Content-Type: application/json' \
-    -d "{\"source1\":\"$S2_BASE\",\"source2\":\"$S2_BASE\"}" \
+    -d '{"engines":[]}' \
     "$PANEL/api/config")"
-if [ "$CODE" = "200" ]; then
-    pass "合法配置保存成功（200）"
+if [ "$CODE" = "400" ]; then
+    pass "空引擎列表被拒绝（400）"
 else
-    fail "合法配置保存失败（实际 HTTP $CODE）"
+    fail "空引擎列表未被拒绝（实际 HTTP $CODE）"
 fi
 
-curl -s --max-time 5 "$PANEL/healthz" >"$WORKDIR/health2.json"
-case "$(cat "$WORKDIR/health2.json")" in
-    *"$S2_BASE"*) pass "/healthz 反映出新地址（配置已生效）" ;;
-    *) fail "/healthz 未反映新地址（实际：$(head -c 200 "$WORKDIR/health2.json")）" ;;
-esac
+# 真正保存：把引擎1 改到另一个假上游端口，并新增第 3 个引擎
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+    -H 'Content-Type: application/json' \
+    -d "{\"engines\":[{\"name\":\"$E1_NAME\",\"base\":\"$SRC2_BASE\",\"path\":\"/files\"},{\"name\":\"$E2_NAME\",\"base\":\"$SRC2_BASE\",\"path\":\"/s\"},{\"name\":\"新增引擎\",\"base\":\"$SRC1_BASE\",\"path\":\"/s\"}]}" \
+    "$PANEL/api/config")"
+if [ "$CODE" = "200" ]; then
+    pass "保存 3 个引擎成功（200）"
+else
+    fail "保存引擎配置失败（实际 HTTP $CODE）"
+fi
 
-curl -s --max-time 5 "$PROXY1/files?q=abc" >"$WORKDIR/b1b.html"
+HEALTH2="$(curl -s --max-time 5 "$PANEL/healthz")"
+if [ "$(json_field "$HEALTH2" "len(d['engines'])")" = "3" ]; then
+    pass "新增引擎后 /healthz 立刻反映（无需重启）"
+else
+    fail "新增引擎未生效（实际 $(json_field "$HEALTH2" "len(d['engines'])") 个）"
+fi
+E3_PORT="$(json_field "$HEALTH2" "d['engines'][2]['proxyPort']")"
+if [ -n "$E3_PORT" ] && [ "$E3_PORT" != "0" ]; then
+    pass "新增引擎拿到了自己的代理端口：$E3_PORT"
+else
+    fail "新增引擎没有拿到代理端口（实际 ${E3_PORT:-空}）"
+fi
+
+curl -s --max-time 5 "http://127.0.0.1:${E1_PORT}/files?q=abc" >"$WORKDIR/b1b.html"
 case "$(cat "$WORKDIR/b1b.html")" in
-    *"MOCK-UPSTREAM-$SRC2_PORT"*) pass "源1 代理已热切换到新上游（无需重启）" ;;
-    *) fail "源1 代理未热切换（实际：$(head -c 200 "$WORKDIR/b1b.html")）" ;;
+    *"MOCK-UPSTREAM-$SRC2_PORT"*) pass "改地址后引擎1 的代理已热切换" ;;
+    *) fail "引擎1 代理未热切换（实际：$(head -c 200 "$WORKDIR/b1b.html")）" ;;
 esac
 
-if read_config_file | grep -q "$S2_BASE"; then
+if read_config_file | grep -q "$SRC2_BASE"; then
     pass "配置已落盘，重启后仍生效（持久化）"
 else
-    fail "配置文件未落盘或内容不正确"
+    fail "配置文件未落盘或内容不正确（实际：$(read_config_file | head -c 200)）"
 fi
 
 # ---------------------------------------------------------------------------
@@ -321,7 +400,7 @@ fi
 # ---------------------------------------------------------------------------
 # 断言计数下限：不使用 set -e 的脚本，「半途没跑起来」与「全部通过」退出码都是 0，
 # 这条锁专堵那种空转的绿。取实际条数的一半左右并留富余，别贴着实际值。
-MIN_CHECKS=20
+MIN_CHECKS=24
 if [ "$CHECKS" -lt "$MIN_CHECKS" ]; then
     echo "::error title=断言数异常::只执行了 ${CHECKS} 条，低于下限 ${MIN_CHECKS}"
     exit 1

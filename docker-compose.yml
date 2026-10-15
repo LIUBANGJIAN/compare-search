@@ -1,59 +1,29 @@
-# 数据持久化：settings.json（上游地址）与 cookie_115.txt（源1 登录态）都写在 /data 卷里，
-# 重建容器不会丢。用命名卷时 Docker 会把镜像内 /data 的属主带过来，
-# 非 root 进程（uid 10001）可以直接写，不需要手工 chown。
+# compare-search 部署
+#
+# 只需要挂载一个 /data 目录：settings.json（搜索引擎配置）与 cookie_115.txt 都由程序自己生成。
 
 services:
   compare-search:
-    # 镜像名与 GitHub Actions 里推送到 Docker Hub 的名称一致
-    image: ${IMAGE:-namespace-unset/compare-search}:${TAG:-latest}
+    image: ${IMAGE:-liubangjian/compare-search}:${TAG:-latest}
     container_name: compare-search
     restart: unless-stopped
 
     ports:
-      # 面板页（对外访问这个口即可）
-      - "${PANEL_PORT:-18899}:18899"
-      # 源1 代理口：面板里「搜索结果1」是跨端口 iframe，必须一起映射
-      - "${PROXY1_PORT:-18898}:18898"
+      # 18899 = 面板；18898 往下 8 个 = 各搜索引擎的代理端口（每个引擎占一个）
+      - "${PORT_RANGE:-18891-18899}:18891-18899"
 
     environment:
-      # 只是首次启动的初值；之后以页面上「设置」里保存的为准（存在 /data/settings.json）
+      # 只是首次启动的初值；之后以页面上「设置」里保存的为准（写在 /data/settings.json）
       SRC1_BASE: ${SRC1_BASE:-http://192.0.2.20:11510}
       SRC2_BASE: ${SRC2_BASE:-http://192.0.2.20:8787}
-      # 监听地址/端口/数据文件已由镜像 ENV 设好，这里不重复声明；
-      # 若要改端口，记得 ports 与 PAGE_PORT/PROXY1_PORT 一起改。
+      TZ: ${TZ:-Asia/Shanghai}
 
     volumes:
-      - compare-search-data:/data
-
-    healthcheck:
-      # 与 Dockerfile 里那条保持一致
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:18899/healthz"]
-      interval: 30s
-      timeout: 3s
-      start_period: 5s
-      retries: 3
-
-    # 优雅退出：程序监听的是 SIGINT / SIGTERM，默认的 SIGTERM 即可
-    stop_signal: SIGTERM
-    stop_grace_period: 10s
-
-    security_opt:
-      - no-new-privileges:true
+      # 换宿主机目录就改 DATA_DIR（默认当前目录下的 ./data）
+      - ${DATA_DIR:-./data}:/data
 
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
-
-    # 绑定挂载的替代写法（需要先 chown，见注释）：
-    # volumes:
-    #   - ./data:/data     然后执行 mkdir -p ./data && chown -R 10001:10001 ./data
-    #
-    # 未实测的加固先留注释，别当成已验证：
-    # read_only: true
-    # tmpfs:
-    #   - /tmp
-
-volumes:
-  compare-search-data:

@@ -1,6 +1,6 @@
-// compare-search 把一个「每行一个番号」的 txt 变成双引擎并行检索面板：
-// 面板输入框里一行填一个番号（可一次填多个），点一次检索即向两个源同时发起查询；
-// 多个番号会列在右侧番号栏里，点击任意一条即可查看该条的搜索结果，也可用翻页按钮顺序切换。
+// compare-search 把一个「每行一个番号」的 txt 变成多引擎并行检索面板：
+// 面板输入框里一行填一个番号（可一次填多个），点一次检索即向所有已配置的引擎同时发起查询；
+// 多个番号会列在右侧番号栏里，点击任意一条即可查看该条结果，也可用翻页按钮顺序切换。
 //
 // 两种用法：
 //  1. 把 txt 拖到可执行文件图标上，或双击后把 txt 拖进窗口再回车；
@@ -8,8 +8,13 @@
 //
 // 配置分两类：
 //   - 部署参数（端口、监听地址、数据目录）只认环境变量；
-//   - 上游地址可在页面上修改并持久化到配置文件
+//   - 搜索引擎列表可在页面上增删改，并持久化到配置文件
 //     （优先级：配置文件 > 环境变量/config.env > 内置默认值）。
+//
+// URL 直接检索（便于其它程序调用）：
+//
+//	/?q=关键字          打开面板并立即用该关键字检索
+//	/api/search?q=关键字 返回 JSON，含每个引擎的检索地址
 package main
 
 import (
@@ -50,33 +55,35 @@ const (
 	defaultSource1 = "http://192.0.2.20:11510"
 	defaultSource2 = "http://192.0.2.20:8787"
 
-	defaultPagePort   = 18899
-	defaultProxy1Port = 18898
+	defaultPagePort      = 18899
+	defaultProxyPortBase = 18898
 
-	// 面板内隐藏站点外壳的 CSS，可按需增删选择器
-	hideCSS1 = `header,aside,footer{display:none!important}[data-sidebar="sidebar"],[data-slot="sidebar"],[data-slot="sidebar-gap"],[data-sidebar="footer"],[data-slot="sidebar-footer"]{display:none!important}` // 源1：隐藏顶栏、侧边栏、底部统计条
-	hideCSS2 = "header.topbar,#filter-form,.stats,#batchbar{display:none!important}"                                                                                                                              // 源2：隐藏顶栏、筛选条、统计行、批量操作栏
+	// 内置两个引擎的「隐藏站点外壳」CSS，可按需增删选择器
+	hideCSS1 = `header,aside,footer{display:none!important}[data-sidebar="sidebar"],[data-slot="sidebar"],[data-slot="sidebar-gap"],[data-sidebar="footer"],[data-slot="sidebar-footer"]{display:none!important}` // 115 Lite Web：隐藏顶栏、侧边栏、底部统计条
+	hideCSS2 = "header.topbar,#filter-form,.stats,#batchbar{display:none!important}"                                                                                                                              // 资源搜索：隐藏顶栏、筛选条、统计行、批量操作栏
 )
 
 // deployment 是只能通过部署参数指定的部分（页面上改不了）。
 type deployment struct {
-	PagePort   int
-	Proxy1Port int
-	ListenHost string
-	CookieFile string
-	ConfigFile string
+	PagePort      int
+	ProxyPortBase int
+	ListenHost    string
+	CookieFile    string
+	ConfigFile    string
 }
 
 func main() {
 	loadEnvFiles()
 	dep := loadDeployment()
 
-	fallback, fallbackOrigin := sourceDefaults()
-	store, err := newSettingsStore(dep.ConfigFile, fallback, fallbackOrigin)
+	fallbackEngines, fallbackOrigin := defaultEngines()
+	store, err := newSettingsStore(dep.ConfigFile, settings{Engines: fallbackEngines}, fallbackOrigin)
 	if err != nil {
 		fmt.Printf("警告：%v\n", err)
 	}
 	cur, _ := store.snapshot()
+
+	checkDataDir(dep)
 
 	var inputPath string
 	switch {
@@ -123,12 +130,16 @@ func main() {
 	}
 
 	fmt.Println("\n========================================")
-	fmt.Printf("  本地服务已启动：%s\n", pageURL)
-	fmt.Printf("  源1 代理端口：%d    源2 经面板页同源转发\n", dep.Proxy1Port)
-	fmt.Printf("  源1 地址：%s\n", cur.Source1)
-	fmt.Printf("  源2 地址：%s\n", cur.Source2)
+	fmt.Printf("  面板页：%s\n", pageURL)
+	fmt.Printf("  关键字直达：%s/?q=关键字\n", pageURL)
+	fmt.Printf("  检索接口：%s/api/search?q=关键字\n", pageURL)
 	fmt.Printf("  配置文件：%s\n", store.pathOf())
-	fmt.Println("  上游地址可在页面「设置」里修改，保存后立即生效并持久化")
+	fmt.Printf("  引擎代理端口：%d 起（共预留 %d 个）\n", dep.ProxyPortBase, maxEngines)
+	fmt.Println("  ── 搜索引擎 ──")
+	for i, e := range cur.Engines {
+		fmt.Printf("    %d) %-16s %s%s\n", i+1, e.Name, e.Base, e.Path)
+	}
+	fmt.Println("  引擎列表可在页面「设置」里增删改，保存后立即生效")
 	fmt.Println("  按 Enter 键停止服务并退出")
 	fmt.Println("========================================")
 
@@ -141,8 +152,30 @@ func main() {
 
 func printBanner() {
 	fmt.Println("========================================")
-	fmt.Println("  TXT 转双源检索工具")
+	fmt.Println("  TXT 转多引擎检索面板")
 	fmt.Println("========================================")
+}
+
+// checkDataDir 提前探测数据目录是否可写。
+// bind mount 到宿主机目录时若属主是 root，非 root 进程写不进去，
+// 而这个错误往往要等到用户点「保存设置」才暴露 —— 这里提前说清楚。
+func checkDataDir(dep deployment) {
+	seen := map[string]bool{}
+	for _, f := range []string{dep.ConfigFile, dep.CookieFile} {
+		dir := filepath.Dir(f)
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		probe := filepath.Join(dir, ".write-probe")
+		if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
+			fmt.Printf("⚠️  数据目录不可写：%s\n     原因：%v\n", dir, err)
+			fmt.Printf("     页面上的「保存设置」会失败。若用 bind mount，请在宿主机执行：\n")
+			fmt.Printf("     chown -R 10001:10001 %s\n", dir)
+			continue
+		}
+		_ = os.Remove(probe)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -150,12 +183,22 @@ func printBanner() {
 // ---------------------------------------------------------------------------
 
 func loadDeployment() deployment {
+	base := envPortOr("PROXY_PORT_BASE", 0)
+	if base == 0 {
+		// 兼容早期只支持两个源时的变量名
+		base = envPortOr("PROXY1_PORT", defaultProxyPortBase)
+	}
+	if base-maxEngines+1 < 1 {
+		fmt.Printf("警告：PROXY_PORT_BASE=%d 过小，至少需要 %d 个连续端口，改用默认值 %d\n",
+			base, maxEngines, defaultProxyPortBase)
+		base = defaultProxyPortBase
+	}
 	return deployment{
-		PagePort:   envPortOr("PAGE_PORT", defaultPagePort),
-		Proxy1Port: envPortOr("PROXY1_PORT", defaultProxy1Port),
-		ListenHost: envOr("LISTEN_HOST", "127.0.0.1"),
-		CookieFile: defaultDataFile("COOKIE_FILE", "cookie_115.txt"),
-		ConfigFile: defaultDataFile("CONFIG_FILE", "settings.json"),
+		PagePort:      envPortOr("PAGE_PORT", defaultPagePort),
+		ProxyPortBase: base,
+		ListenHost:    envOr("LISTEN_HOST", "127.0.0.1"),
+		CookieFile:    defaultDataFile("COOKIE_FILE", "cookie_115.txt"),
+		ConfigFile:    defaultDataFile("CONFIG_FILE", "settings.json"),
 	}
 }
 
@@ -170,12 +213,13 @@ func defaultDataFile(envKey, name string) string {
 	return name
 }
 
-// sourceDefaults 返回上游地址的初值，以及它来自环境变量还是内置默认值。
-func sourceDefaults() (settings, settingsOrigin) {
+// defaultEngines 返回引擎列表的初值，以及它来自环境变量还是内置默认值。
+func defaultEngines() ([]engine, settingsOrigin) {
 	s1 := strings.TrimSpace(os.Getenv("SRC1_BASE"))
 	s2 := strings.TrimSpace(os.Getenv("SRC2_BASE"))
+	origin := originEnv
 	if s1 == "" && s2 == "" {
-		return settings{Source1: defaultSource1, Source2: defaultSource2}, originDefault
+		origin = originDefault
 	}
 	if s1 == "" {
 		s1 = defaultSource1
@@ -183,7 +227,10 @@ func sourceDefaults() (settings, settingsOrigin) {
 	if s2 == "" {
 		s2 = defaultSource2
 	}
-	return settings{Source1: strings.TrimRight(s1, "/"), Source2: strings.TrimRight(s2, "/")}, originEnv
+	return []engine{
+		{Name: "115 Lite Web", Base: strings.TrimRight(s1, "/"), Path: "/files", HideCSS: hideCSS1},
+		{Name: "资源搜索", Base: strings.TrimRight(s2, "/"), Path: "/s", HideCSS: hideCSS2},
+	}, origin
 }
 
 func envOr(key, fallback string) string {
@@ -308,89 +355,107 @@ func readList(path string) ([]string, error) {
 // 服务
 // ---------------------------------------------------------------------------
 
-// pageData 是注入面板页的引导数据：番号列表与当前上游地址都从这里下发，
-// 前端不再依赖服务端渲染的列表 HTML。
+// pageData 是注入面板页的引导数据：番号列表、引擎列表（含各自代理端口）都从这里下发。
 type pageData struct {
-	Items   []string `json:"items"`
-	Source1 string   `json:"source1"`
-	Source2 string   `json:"source2"`
-	Origin  string   `json:"origin"`
-	Version string   `json:"version"`
-	P1Port  int      `json:"p1Port"`
+	Items      []string        `json:"items"`
+	Engines    []enginePayload `json:"engines"`
+	Origin     string          `json:"origin"`
+	Version    string          `json:"version"`
+	Query      string          `json:"q"`
+	MaxEngines int             `json:"maxEngines"`
 }
 
-// startServers 启动两个本地服务：
-//   - 端口 dep.Proxy1Port：全部反向代理到源1（剥安全头 + 注入隐藏 CSS + 绝对地址改写）
-//   - 端口 dep.PagePort ："/" 面板页，"/healthz" 健康检查，"/api/config" 配置接口，
-//     其余路径反向代理到源2（同样剥头 + 注入 CSS）
+// startServers 启动：
+//   - 面板端口：面板页 / /healthz / /api/config / /api/search
+//   - 引擎代理端口：从 dep.ProxyPortBase 往下依次分配，每个引擎一个
+//
+// 代理端口在启动时一次性建好（即使当前用不到那么多），
+// 这样页面上增删引擎时不用重启监听，也不会出现「端口变了但映射没变」的问题。
 func startServers(dep deployment, store *settingsStore, items []string) (string, error) {
 	cur, _ := store.snapshot()
-
-	t1, err := newProxyTarget(cur.Source1)
-	if err != nil {
-		return "", fmt.Errorf("源1 地址不合法: %w", err)
-	}
-	t2, err := newProxyTarget(cur.Source2)
-	if err != nil {
-		return "", fmt.Errorf("源2 地址不合法: %w", err)
-	}
-
 	jar := newCookieJar(dep.CookieFile)
+	reg := &engineRegistry{}
 
-	// 源1 代理服务
-	ln1, err := listenOn(dep.ListenHost, dep.Proxy1Port)
-	if err != nil {
-		return "", fmt.Errorf("监听源1代理端口失败: %w", err)
+	ports := make([]int, 0, maxEngines)
+	for i := 0; i < maxEngines; i++ {
+		ln, err := listenOn(dep.ListenHost, dep.ProxyPortBase-i)
+		if err != nil {
+			return "", fmt.Errorf("监听第 %d 个引擎的代理端口失败: %w", i+1, err)
+		}
+		ports = append(ports, portOf(ln))
+		go func(ln net.Listener, idx int) {
+			_ = http.Serve(ln, makeEngineHandler(reg, idx, jar))
+		}(ln, i)
 	}
-	mux1 := http.NewServeMux()
-	mux1.Handle("/", makeProxy(t1.get, hideCSS1, jar))
-	go func() { _ = http.Serve(ln1, mux1) }()
+	reg.setPorts(ports)
 
-	// 源2 代理 + 面板页服务
-	ln2, err := listenOn(dep.ListenHost, dep.PagePort)
+	if err := reg.apply(cur.Engines); err != nil {
+		return "", err
+	}
+
+	ln, err := listenOn(dep.ListenHost, dep.PagePort)
 	if err != nil {
-		_ = ln1.Close()
 		return "", fmt.Errorf("监听面板端口失败: %w", err)
 	}
 
-	p1Port := portOf(ln1)
-	proxy2 := makeProxy(t2.get, hideCSS2, nil)
 	itemCount := func() int { return len(items) }
 
-	mux2 := http.NewServeMux()
-	mux2.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		s, orig := store.snapshot()
+		engines := make([]map[string]any, 0, len(s.Engines))
+		for _, rt := range reg.snapshot() {
+			engines = append(engines, map[string]any{
+				"name":      rt.eng.Name,
+				"base":      rt.eng.Base,
+				"path":      rt.eng.Path,
+				"proxyPort": rt.port,
+			})
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":  "ok",
 			"version": version,
 			"items":   len(items),
-			"source1": s.Source1,
-			"source2": s.Source2,
 			"origin":  string(orig),
+			"engines": engines,
 		})
 	})
-	mux2.HandleFunc("/api/config", makeConfigHandler(store, t1, t2, itemCount))
-	mux2.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			s, orig := store.snapshot()
+	mux.HandleFunc("/api/config", makeConfigHandler(store, reg, dep, itemCount))
+	mux.HandleFunc("/api/search", makeSearchAPI(store, reg, itemCount))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			_, _ = io.WriteString(w, buildPage(pageData{
-				Items:   items,
-				Source1: s.Source1,
-				Source2: s.Source2,
-				Origin:  string(orig),
-				Version: version,
-				P1Port:  p1Port,
-			}))
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, notFoundPage(r.URL.Path))
 			return
 		}
-		proxy2.ServeHTTP(w, r)
+		s, orig := store.snapshot()
+		payload := make([]enginePayload, 0, len(s.Engines))
+		runtimes := reg.snapshot()
+		for i, e := range s.Engines {
+			port := 0
+			if i < len(runtimes) {
+				port = runtimes[i].port
+			}
+			payload = append(payload, enginePayload{
+				Name: e.Name, Base: e.Base, Path: e.Path, HideCSS: e.HideCSS, ProxyPort: port,
+			})
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, buildPage(pageData{
+			Items:      items,
+			Engines:    payload,
+			Origin:     string(orig),
+			Version:    version,
+			Query:      strings.TrimSpace(r.URL.Query().Get("q")),
+			MaxEngines: maxEngines,
+		}))
 	})
-	go func() { _ = http.Serve(ln2, mux2) }()
+	go func() { _ = http.Serve(ln, mux) }()
 
 	host := displayHost(dep.ListenHost)
-	return fmt.Sprintf("http://%s:%d", host, portOf(ln2)), nil
+	return fmt.Sprintf("http://%s:%d", host, portOf(ln)), nil
 }
 
 // buildPage 把面板模板里的占位符填实。
@@ -400,10 +465,35 @@ func buildPage(data pageData) string {
 	if err != nil {
 		raw = []byte(`{}`)
 	}
-	page := strings.ReplaceAll(panelHTMLRaw, "{P1PORT}", strconv.Itoa(data.P1Port))
-	page = strings.ReplaceAll(page, "{SCRIPT}", panelJSRaw)
+	page := strings.ReplaceAll(panelHTMLRaw, "{SCRIPT}", panelJSRaw)
 	page = strings.ReplaceAll(page, "{BOOTSTRAP}", string(raw))
 	return page
+}
+
+// placeholderPage 用于「这个代理端口上当前没有引擎」的情况。
+// 返回提示页而不是 404：用户删掉引擎后，某个 iframe 可能还停在这个端口上。
+func placeholderPage(slot int) string {
+	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">` +
+		`<style>body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;` +
+		`font-family:-apple-system,"Segoe UI",Arial,sans-serif;color:#94a3b8;font-size:14px;background:#fbfcfe}</style>` +
+		`</head><body>第 ` + strconv.Itoa(slot) + ` 个引擎位当前未配置</body></html>`
+}
+
+func notFoundPage(path string) string {
+	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">` +
+		`<style>body{font-family:-apple-system,"Segoe UI",Arial,sans-serif;color:#334155;padding:32px;line-height:1.8}` +
+		`code{background:#f1f5f9;padding:2px 6px;border-radius:4px}</style></head><body>` +
+		`<h3>404 · 面板端口上没有这个路径</h3>` +
+		`<p>请求路径：<code>` + htmlEscape(path) + `</code></p>` +
+		`<p>面板端口只提供：<code>/</code>（面板页）、<code>/?q=关键字</code>（直达检索）、` +
+		`<code>/api/search?q=关键字</code>（JSON 接口）、<code>/api/config</code>、<code>/healthz</code></p>` +
+		`<p>各搜索引擎有自己的代理端口，见面板页或 <code>/healthz</code>。</p>` +
+		`</body></html>`
+}
+
+func htmlEscape(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
+	return r.Replace(s)
 }
 
 func portOf(ln net.Listener) int {
@@ -469,7 +559,7 @@ func pauseAndExit() {
 // Cookie
 // ---------------------------------------------------------------------------
 
-// cookieJar 保存某个源的登录 Cookie 并持久化到本地文件。
+// cookieJar 保存源1 的登录 Cookie 并持久化到本地文件。
 // 面板走本地代理后与浏览器里原站的登录态互相隔离（cookie 按域隔离），
 // 有了它：面板里登录一次，代理记住会话，之后不再需要登录。
 type cookieJar struct {
@@ -546,35 +636,46 @@ func (j *cookieJar) absorb(cookies []*http.Cookie) {
 // 反向代理
 // ---------------------------------------------------------------------------
 
-// proxyTarget 允许在运行时热切换上游地址，配置保存后无需重启即可生效。
-type proxyTarget struct {
-	mu sync.RWMutex
-	u  *url.URL
-}
+// makeEngineHandler 为「第 index 个引擎位」提供反向代理服务。
+// 该位置当前没有引擎时返回提示页；引擎地址被改过则换用新的代理实例，
+// 代理实例按「地址+隐藏CSS」缓存复用，避免每个请求都重建。
+func makeEngineHandler(reg *engineRegistry, index int, jar *cookieJar) http.Handler {
+	var mu sync.Mutex
+	cache := make(map[string]*httputil.ReverseProxy)
 
-func newProxyTarget(raw string) (*proxyTarget, error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil, err
+	proxyFor := func(rt engineRuntime) *httputil.ReverseProxy {
+		key := rt.eng.Base + "\x00" + rt.eng.HideCSS
+		mu.Lock()
+		defer mu.Unlock()
+		if p, ok := cache[key]; ok {
+			return p
+		}
+		if len(cache) > 32 {
+			cache = make(map[string]*httputil.ReverseProxy)
+		}
+		u, err := url.Parse(rt.eng.Base)
+		if err != nil {
+			return nil
+		}
+		p := makeProxy(u, rt.eng.HideCSS, jar)
+		cache[key] = p
+		return p
 	}
-	return &proxyTarget{u: u}, nil
-}
 
-func (p *proxyTarget) set(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return err
-	}
-	p.mu.Lock()
-	p.u = u
-	p.mu.Unlock()
-	return nil
-}
-
-func (p *proxyTarget) get() *url.URL {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.u
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rt, ok := reg.at(index)
+		if !ok {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(w, placeholderPage(index+1))
+			return
+		}
+		proxy := proxyFor(rt)
+		if proxy == nil {
+			http.Error(w, "引擎地址无效", http.StatusBadGateway)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	})
 }
 
 // rewriter 缓存某个上游地址的三种书写形式，正文改写时按「长模式优先」替换：
@@ -601,8 +702,10 @@ func newRewriter(target *url.URL) *rewriter {
 // makeProxy 创建反向代理：剥掉禁止 iframe 内嵌的安全头；
 // 对 HTML/JS/CSS 响应做正文改写（绝对地址转相对），并向 HTML 注入隐藏站点外壳的 CSS；
 // jar 非 nil 时自动携带/记录该源的登录 Cookie。
-// 目标地址每次请求都从 getTarget 现取，因此支持热切换。
-func makeProxy(getTarget func() *url.URL, hideCSS string, jar *cookieJar) *httputil.ReverseProxy {
+func makeProxy(target *url.URL, hideCSS string, jar *cookieJar) *httputil.ReverseProxy {
+	origin := target.Scheme + "://" + target.Host
+	rw := newRewriter(target)
+
 	return &httputil.ReverseProxy{
 		// 关闭传输层的自动解压：我们要拿到后端的原始字节自行判断，
 		// 而不是被透明解压后丢掉 Content-Encoding 头、再对已解压内容做字符串改写。
@@ -616,17 +719,14 @@ func makeProxy(getTarget func() *url.URL, hideCSS string, jar *cookieJar) *httpu
 			DisableCompression:    true,
 		},
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			target := getTarget()
-			rw := newRewriter(target)
-
 			pr.SetURL(target)
 			// SetURL 会把 Host 清空，这里恢复成上游主机名（源站常据此做校验）
 			pr.Out.Host = target.Host
 			pr.SetXForwarded()
 
 			// 让后端看到的 Origin/Referer 与其真实主机一致，避免源站跨域校验拦截（如下载接口）
-			pr.Out.Header.Set("Origin", rw.origin)
-			pr.Out.Header.Set("Referer", rw.origin+"/")
+			pr.Out.Header.Set("Origin", origin)
+			pr.Out.Header.Set("Referer", origin+"/")
 			// 显式声明 identity，让后端返回未压缩内容以便正文改写。
 			// 注意：这里不能只是 Del —— net/http 的 Transport 在请求头缺失 Accept-Encoding
 			// 时会自动补回 "gzip"，上游仍可能返回压缩体。
@@ -666,11 +766,6 @@ func makeProxy(getTarget func() *url.URL, hideCSS string, jar *cookieJar) *httpu
 				return nil
 			}
 			if resp.Request != nil && resp.Request.Method == http.MethodHead {
-				return nil
-			}
-
-			rw, _ := resp.Request.Context().Value(rewriterKey{}).(*rewriter)
-			if rw == nil {
 				return nil
 			}
 

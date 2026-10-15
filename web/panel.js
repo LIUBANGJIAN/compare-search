@@ -1,8 +1,13 @@
 /*
- * 双引擎检索面板的前端逻辑。
+ * 多引擎检索面板的前端逻辑。
  *
  * 本文件既会被 //go:embed 内联进面板页，也可在 Node 下 require 做单元测试，
- * 所以刻意把纯函数（番号切分 / URL 构造 / 翻页索引 / 宽度夹取）与 DOM 初始化分开。
+ * 所以刻意把纯函数（番号切分 / URL 构造 / 翻页索引 / 槽位选择 / 宽度夹取）
+ * 与 DOM 初始化分开。
+ *
+ * 每个引擎有两个 iframe「槽位」，轮流担任「正在显示」与「预取下一条」：
+ * 用户点下一条时，如果另一个槽位已经把这条加载好了，直接切可见性即可瞬时呈现，
+ * 而不是等到点了才去请求。
  */
 (function (root, factory) {
     'use strict';
@@ -25,13 +30,10 @@
     // 刻意不把「空格」算作分隔符 —— 一个番号就是在输入框里的一行。
     var SEPARATOR = /[\r\n]+|[,，;；、]+/;
 
-    // 源1 上「番号检索」的路径；源2 走面板页同源路径，由本地服务转发
-    var SOURCE1_SEARCH_PATH = '/files';
-    var SOURCE2_SEARCH_PATH = '/s';
-
     var DEFAULT_CODES_WIDTH = 216;
     var MIN_CODES_WIDTH = 150;
     var MAX_CODES_WIDTH = 640;
+    var BLANK = 'about:blank';
 
     /**
      * 把用户输入切分成番号列表：去空白、去重、保持原始顺序。
@@ -53,17 +55,36 @@
     }
 
     /**
-     * 生成两个 iframe 的目标地址。
-     * @param {string} keyword 单个番号
-     * @param {string} p1Base  源1 代理基址，如 http://127.0.0.1:18898
-     * @returns {{source1: string, source2: string}}
+     * 生成某个引擎对某个番号的检索地址。
+     * @param {object} engine   {name, base, path, proxyPort}
+     * @param {string} keyword  番号
+     * @param {string} proto    页面协议，如 http:
+     * @param {string} hostname 页面主机名（用主机名而不是 127.0.0.1，局域网访问时才正确）
+     * @returns {string}
      */
-    function buildUrls(keyword, p1Base) {
-        var q = encodeURIComponent(keyword);
-        return {
-            source1: String(p1Base) + SOURCE1_SEARCH_PATH + '?q=' + q,
-            source2: SOURCE2_SEARCH_PATH + '?q=' + q
-        };
+    function engineUrl(engine, keyword, proto, hostname) {
+        if (!engine || !engine.proxyPort) return BLANK;
+        var path = engine.path || '/';
+        if (path.charAt(0) !== '/') path = '/' + path;
+        return String(proto) + '//' + String(hostname) + ':' + engine.proxyPort +
+            path + '?q=' + encodeURIComponent(keyword);
+    }
+
+    /**
+     * 决定这次该用哪个槽位呈现：
+     * 另一个槽位若已经加载好了同一个番号的同一个地址，就切过去（瞬时）；
+     * 否则仍用当前槽位重新加载。
+     * @param {{active:number, loaded:number[], urls:string[]}} slot
+     * @param {number} index 番号下标
+     * @param {string} url   该番号在当前引擎配置下应有的地址
+     * @returns {number} 槽位下标（0 或 1）
+     */
+    function chooseSlot(slot, index, url) {
+        var other = 1 - slot.active;
+        if (slot.loaded[other] === index && slot.urls[other] === url) {
+            return other;
+        }
+        return slot.active;
     }
 
     /** 下一个索引；已在末尾则原地不动。index = -1 表示还没开始检索。 */
@@ -98,8 +119,7 @@
     function init() {
         var d = document;
         var els = {
-            frame1: d.getElementById('frame1'),
-            frame2: d.getElementById('frame2'),
+            resultsCol: d.getElementById('resultsCol'),
             kwInput: d.getElementById('kwInput'),
             searchBtn: d.getElementById('searchBtn'),
             settingsBtn: d.getElementById('settingsBtn'),
@@ -115,8 +135,8 @@
             layout: d.getElementById('layout'),
             splitter: d.getElementById('splitter'),
             dialog: d.getElementById('settingsDialog'),
-            src1Input: d.getElementById('src1Input'),
-            src2Input: d.getElementById('src2Input'),
+            engineList: d.getElementById('engineList'),
+            addEngineBtn: d.getElementById('addEngineBtn'),
             settingsHint: d.getElementById('settingsHint'),
             settingsSave: d.getElementById('settingsSave'),
             settingsCancel: d.getElementById('settingsCancel')
@@ -126,34 +146,37 @@
         }
 
         // ---------------- 引导数据 ----------------
-        var boot = { items: [], source1: '', source2: '', origin: '', version: '', p1Port: 0 };
+        var boot = {
+            items: [], engines: [], origin: '', version: '', q: '', maxEngines: 8
+        };
         var bootEl = d.getElementById('bootstrap');
         if (bootEl && bootEl.textContent) {
             try {
                 var parsed = JSON.parse(bootEl.textContent);
                 if (parsed && typeof parsed === 'object') {
                     if (Array.isArray(parsed.items)) boot.items = parsed.items;
-                    if (typeof parsed.source1 === 'string') boot.source1 = parsed.source1;
-                    if (typeof parsed.source2 === 'string') boot.source2 = parsed.source2;
+                    if (Array.isArray(parsed.engines)) boot.engines = parsed.engines;
                     if (typeof parsed.origin === 'string') boot.origin = parsed.origin;
                     if (typeof parsed.version === 'string') boot.version = parsed.version;
-                    if (typeof parsed.p1Port === 'number') boot.p1Port = parsed.p1Port;
+                    if (typeof parsed.q === 'string') boot.q = parsed.q;
+                    if (typeof parsed.maxEngines === 'number') boot.maxEngines = parsed.maxEngines;
                 }
             } catch (e) {
                 /* 引导数据损坏时退化为空列表，页面仍可用 */
             }
         }
 
-        var p1Port = boot.p1Port || parseInt(d.body.getAttribute('data-p1-port'), 10) || 0;
-        var p1Base = window.location.protocol + '//' + window.location.hostname + ':' + p1Port;
-        var storageKey = 't2h_' + (window.location.port || p1Port || 'default');
+        var proto = window.location.protocol;
+        var hostname = window.location.hostname;
+        var storageKey = 't2h_' + (window.location.port || 'default');
 
         var state = {
             items: [],
             index: -1,
             viewed: Object.create(null),
-            sources: { source1: boot.source1, source2: boot.source2 },
-            origin: boot.origin
+            engines: boot.engines.slice(),
+            origin: boot.origin,
+            maxEngines: boot.maxEngines || 8
         };
 
         function readStore(key, fallback) {
@@ -182,6 +205,132 @@
             }
         } catch (e) {
             state.viewed = Object.create(null);
+        }
+
+        // ---------------- 结果面板（每个引擎一个，含两个槽位） ----------------
+        var slots = [];
+
+        function buildEnginePanels() {
+            // 原地清空而不是重新赋值：这样外部持有的 slots 引用（state.slots）不会失效
+            slots.length = 0;
+            els.resultsCol.textContent = '';
+            if (state.engines.length === 0) {
+                var tip = d.createElement('div');
+                tip.classList.add('list-empty');
+                tip.textContent = '还没有配置搜索引擎。点右上角「设置」添加。';
+                els.resultsCol.appendChild(tip);
+                return;
+            }
+            state.engines.forEach(function (eng, i) {
+                var panel = d.createElement('div');
+                panel.classList.add('panel');
+
+                var header = d.createElement('div');
+                header.classList.add('panel-header');
+                var title = d.createElement('span');
+                title.classList.add('eng-name');
+                title.textContent = eng.name || ('引擎 ' + (i + 1));
+                header.appendChild(title);
+                if (eng.base) {
+                    var baseEl = d.createElement('span');
+                    baseEl.classList.add('eng-base');
+                    baseEl.textContent = eng.base;
+                    header.appendChild(baseEl);
+                }
+
+                var wrap = d.createElement('div');
+                wrap.classList.add('frame-wrap');
+                var frames = [0, 1].map(function (k) {
+                    var f = d.createElement('iframe');
+                    f.classList.add('engine-frame');
+                    f.setAttribute('title', eng.name || ('引擎 ' + (i + 1)));
+                    f.setAttribute('data-slot', String(k));
+                    if (k === 0) f.classList.add('engine-frame-active');
+                    wrap.appendChild(f);
+                    return f;
+                });
+
+                var status = d.createElement('div');
+                status.classList.add('frame-status');
+                status.textContent = '加载中…';
+                status.hidden = true;
+                wrap.appendChild(status);
+
+                panel.appendChild(header);
+                panel.appendChild(wrap);
+                els.resultsCol.appendChild(panel);
+
+                var slot = { frames: frames, active: 0, loaded: [-1, -1], urls: ['', ''], status: status };
+                frames.forEach(function (f, k) {
+                    f.addEventListener('load', function () {
+                        // 只有「正在显示」的槽位加载完成才收起加载提示
+                        if (slot.active === k) slot.status.hidden = true;
+                    });
+                });
+                slots.push(slot);
+            });
+        }
+
+        function engineAt(i) { return state.engines[i] || null; }
+
+        // 呈现第 i 个番号：能命中预取就切槽位（瞬时），否则当场加载
+        function present(i) {
+            var keyword = state.items[i];
+            state.engines.forEach(function (eng, ei) {
+                var slot = slots[ei];
+                if (!slot) return;
+                var url = engineUrl(eng, keyword, proto, hostname);
+                var target = chooseSlot(slot, i, url);
+                if (target !== slot.active) {
+                    slot.frames[slot.active].classList.remove('engine-frame-active');
+                    slot.frames[target].classList.add('engine-frame-active');
+                    slot.active = target;
+                    slot.status.hidden = true;
+                    return;
+                }
+                if (slot.urls[target] === url && slot.loaded[target] === i) {
+                    return; // 已经是这一条，不用重载
+                }
+                slot.loaded[target] = i;
+                slot.urls[target] = url;
+                slot.status.hidden = false;
+                slot.frames[target].src = url;
+            });
+        }
+
+        // 预取第 i 个番号到「非当前」槽位，让下一次切换瞬时完成
+        function prefetch(i) {
+            if (i < 0 || i >= state.items.length) return;
+            var keyword = state.items[i];
+            state.engines.forEach(function (eng, ei) {
+                var slot = slots[ei];
+                if (!slot) return;
+                var other = 1 - slot.active;
+                var url = engineUrl(eng, keyword, proto, hostname);
+                if (slot.loaded[other] === i && slot.urls[other] === url) return;
+                slot.loaded[other] = i;
+                slot.urls[other] = url;
+                slot.frames[other].src = url;
+            });
+        }
+
+        // 强制重新加载当前番号（上游地址变了但 URL 串没变时，直接赋同样的值不会触发加载）
+        function reloadCurrent() {
+            if (state.index < 0 || state.index >= state.items.length) return;
+            slots.forEach(function (slot) {
+                slot.loaded = [-1, -1];
+                slot.urls = ['', ''];
+            });
+            present(state.index);
+        }
+
+        function clearFrames() {
+            slots.forEach(function (slot) {
+                slot.loaded = [-1, -1];
+                slot.urls = ['', ''];
+                slot.status.hidden = true;
+                slot.frames.forEach(function (f) { f.src = BLANK; });
+            });
         }
 
         // ---------------- 番号栏 ----------------
@@ -245,29 +394,6 @@
         }
 
         // ---------------- 检索 ----------------
-        function loadCurrent(force) {
-            if (state.index < 0 || state.index >= state.items.length) return;
-            var urls = buildUrls(state.items[state.index], p1Base);
-            if (!force) {
-                els.frame1.src = urls.source1;
-                els.frame2.src = urls.source2;
-                return;
-            }
-            // 上游地址变了但 URL 串没变时，直接赋值同样字符串不会触发重新加载，
-            // 先置空再回填来强制刷新。
-            els.frame1.src = 'about:blank';
-            els.frame2.src = 'about:blank';
-            var reload = function () {
-                els.frame1.src = urls.source1;
-                els.frame2.src = urls.source2;
-            };
-            if (typeof setTimeout === 'function') {
-                setTimeout(reload, 0);
-            } else {
-                reload();
-            }
-        }
-
         function markViewed(keyword) {
             if (state.viewed[keyword]) return;
             state.viewed[keyword] = true;
@@ -282,7 +408,8 @@
             if (i < 0 || i >= state.items.length) return;
             state.index = i;
             markViewed(state.items[i]);
-            loadCurrent(false);
+            present(i);
+            prefetch(i + 1);
             refreshListState();
             renderPager();
             scrollCurrentIntoView();
@@ -349,8 +476,7 @@
             writeStore('_viewed', '{}');
             buildListNodes();
             renderPager();
-            els.frame1.src = 'about:blank';
-            els.frame2.src = 'about:blank';
+            clearFrames();
         });
 
         // ---------------- 番号栏宽度与收起 ----------------
@@ -404,7 +530,9 @@
             setCodesWidth(DEFAULT_CODES_WIDTH, true);
         });
 
-        // ---------------- 设置 ----------------
+        // ---------------- 设置：引擎增删改 ----------------
+        var editorRows = [];   // [{name, base, path, css}]，与 DOM 行顺序一致
+
         function setHint(text, kind) {
             els.settingsHint.textContent = text || '';
             els.settingsHint.classList.remove('error');
@@ -412,9 +540,111 @@
             if (kind) els.settingsHint.classList.add(kind);
         }
 
+        function updateAddButton() {
+            var full = editorRows.length >= state.maxEngines;
+            els.addEngineBtn.disabled = full;
+            els.addEngineBtn.textContent = full
+                ? ('已达上限（' + state.maxEngines + ' 个）')
+                : '+ 新增搜索引擎';
+        }
+
+        function makeField(labelText, value, cls, placeholder) {
+            var wrap = d.createElement('div');
+            wrap.classList.add(cls);
+            var label = d.createElement('label');
+            label.textContent = labelText;
+            var input = d.createElement('input');
+            input.setAttribute('type', 'text');
+            input.setAttribute('spellcheck', 'false');
+            input.value = value || '';
+            if (placeholder) input.setAttribute('placeholder', placeholder);
+            label.appendChild(input);
+            wrap.appendChild(label);
+            return { wrap: wrap, input: input };
+        }
+
+        function renderEditor(rows) {
+            els.engineList.textContent = '';
+            editorRows = [];
+
+            rows.forEach(function (eng) {
+                var rec = {
+                    name: eng.name || '',
+                    base: eng.base || '',
+                    path: eng.path || '',
+                    css: eng.hideCss || ''
+                };
+
+                var row = d.createElement('div');
+                row.classList.add('engine-row');
+
+                var head = d.createElement('div');
+                head.classList.add('row-head');
+
+                var fName = makeField('名称', rec.name, 'f-name', '例如 资源搜索');
+                var fBase = makeField('地址', rec.base, 'f-base', 'http://192.0.2.20:8787');
+                var fPath = makeField('搜索路径', rec.path, 'f-path', '/s');
+
+                var del = d.createElement('button');
+                del.classList.add('del-btn');
+                del.setAttribute('type', 'button');
+                del.textContent = '删除';
+                del.addEventListener('click', function () {
+                    syncEditor();
+                    var i = editorRows.indexOf(rec);
+                    if (i >= 0) editorRows.splice(i, 1);
+                    renderEditor(editorRows);
+                });
+
+                head.appendChild(fName.wrap);
+                head.appendChild(fBase.wrap);
+                head.appendChild(fPath.wrap);
+                head.appendChild(del);
+
+                var details = d.createElement('details');
+                var summary = d.createElement('summary');
+                summary.textContent = '高级：隐藏该站点自身的外壳（CSS 选择器）';
+                var cssLabel = d.createElement('label');
+                cssLabel.textContent = '留空表示不隐藏';
+                var cssInput = d.createElement('textarea');
+                cssInput.setAttribute('spellcheck', 'false');
+                cssInput.value = rec.css || '';
+                cssLabel.appendChild(cssInput);
+                details.appendChild(summary);
+                details.appendChild(cssLabel);
+
+                row.appendChild(head);
+                row.appendChild(details);
+                els.engineList.appendChild(row);
+
+                rec.nodes = { name: fName.input, base: fBase.input, path: fPath.input, css: cssInput };
+                editorRows.push(rec);
+            });
+
+            updateAddButton();
+        }
+
+        function syncEditor() {
+            editorRows.forEach(function (rec) {
+                if (!rec.nodes) return;
+                rec.name = String(rec.nodes.name.value || '').trim();
+                rec.base = String(rec.nodes.base.value || '').trim();
+                rec.path = String(rec.nodes.path.value || '').trim();
+                rec.css = String(rec.nodes.css.value || '').trim();
+            });
+        }
+
+        function collectEngines() {
+            syncEditor();
+            return editorRows.map(function (rec) {
+                var e = { name: rec.name, base: rec.base, path: rec.path };
+                if (rec.css) e.hideCss = rec.css;
+                return e;
+            });
+        }
+
         function openSettings() {
-            els.src1Input.value = state.sources.source1 || '';
-            els.src2Input.value = state.sources.source2 || '';
+            renderEditor(state.engines);
             setHint('当前生效来源：' + (state.origin || '未知'), '');
             if (typeof els.dialog.showModal === 'function') {
                 els.dialog.showModal();
@@ -425,16 +655,16 @@
 
         function applyConfig(data) {
             if (!data || typeof data !== 'object') return;
-            if (typeof data.source1 === 'string') state.sources.source1 = data.source1;
-            if (typeof data.source2 === 'string') state.sources.source2 = data.source2;
+            if (Array.isArray(data.engines)) {
+                state.engines = data.engines;
+                buildEnginePanels();
+            }
             if (typeof data.origin === 'string') state.origin = data.origin;
+            if (typeof data.maxEngines === 'number') state.maxEngines = data.maxEngines;
         }
 
         function saveSettings() {
-            var payload = {
-                source1: String(els.src1Input.value || '').trim(),
-                source2: String(els.src2Input.value || '').trim()
-            };
+            var payload = { engines: collectEngines() };
             setHint('正在保存…', '');
             els.settingsSave.disabled = true;
 
@@ -454,8 +684,8 @@
                     return;
                 }
                 applyConfig(res.data);
-                setHint('已保存并生效：' + state.sources.source1 + ' / ' + state.sources.source2, 'ok');
-                if (state.index >= 0) loadCurrent(true);
+                setHint('已保存并生效：共 ' + state.engines.length + ' 个搜索引擎', 'ok');
+                if (state.index >= 0) reloadCurrent();
             }).catch(function (err) {
                 els.settingsSave.disabled = false;
                 setHint('请求失败：' + (err && err.message ? err.message : String(err)), 'error');
@@ -467,25 +697,38 @@
         els.settingsCancel.addEventListener('click', function () {
             if (typeof els.dialog.close === 'function') els.dialog.close();
         });
+        els.addEngineBtn.addEventListener('click', function () {
+            syncEditor();
+            if (editorRows.length >= state.maxEngines) return;
+            editorRows.push({ name: '新搜索引擎', base: '', path: '/s', css: '' });
+            renderEditor(editorRows);
+        });
 
         // ---------------- 初始状态 ----------------
+        buildEnginePanels();
         setItems(boot.items, false);
         els.kwInput.value = boot.items.join('\n');
 
+        // 支持 /?q=关键字 直接检索（便于其它程序调用或做成浏览器书签）
+        if (boot.q) {
+            els.kwInput.value = boot.q;
+            submitSearch();
+        }
+
+        state.slots = slots;
         return state;
     }
 
     return {
         splitKeywords: splitKeywords,
-        buildUrls: buildUrls,
+        engineUrl: engineUrl,
+        chooseSlot: chooseSlot,
         nextIndex: nextIndex,
         prevIndex: prevIndex,
         indexOfKeyword: indexOfKeyword,
         clampCodesWidth: clampCodesWidth,
         init: init,
         SEPARATOR: SEPARATOR,
-        SOURCE1_SEARCH_PATH: SOURCE1_SEARCH_PATH,
-        SOURCE2_SEARCH_PATH: SOURCE2_SEARCH_PATH,
         DEFAULT_CODES_WIDTH: DEFAULT_CODES_WIDTH,
         MIN_CODES_WIDTH: MIN_CODES_WIDTH,
         MAX_CODES_WIDTH: MAX_CODES_WIDTH

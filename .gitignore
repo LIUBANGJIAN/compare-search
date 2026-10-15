@@ -28,3 +28,11 @@ __pycache__/
 # 编辑器/工具留下的临时文件
 *~
 *.tmp
+
+# 实际部署文件（含宿主机路径与内网地址，绝不入库）
+实际compose.yaml
+env.yaml
+.env
+
+# compose 默认的数据目录
+data/

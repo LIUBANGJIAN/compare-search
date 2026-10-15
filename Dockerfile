@@ -24,7 +24,7 @@ COPY --from=builder /out/compare-search /usr/local/bin/compare-search
 # 数据文件统一放在 /data（声明为 VOLUME，便于挂载持久化）
 ENV LISTEN_HOST=0.0.0.0 \
     PAGE_PORT=18899 \
-    PROXY1_PORT=18898 \
+    PROXY_PORT_BASE=18898 \
     COOKIE_FILE=/data/cookie_115.txt \
     CONFIG_FILE=/data/settings.json \
     NO_BROWSER=1 \
@@ -34,7 +34,10 @@ WORKDIR /data
 VOLUME ["/data"]
 USER 10001
 
-EXPOSE 18899 18898
+# 面板端口
+EXPOSE 18899
+# 搜索引擎的代理端口：从 18898 往下共 8 个（每个引擎占一个）
+EXPOSE 18891-18898
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget -q -O /dev/null "http://127.0.0.1:${PAGE_PORT:-18899}/healthz" || exit 1

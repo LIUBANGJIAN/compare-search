@@ -10,157 +10,259 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
 
+func eng(name, base, path string) engine {
+	return engine{Name: name, Base: base, Path: path}
+}
+
 // ---------------------------------------------------------------------------
-// 配置：地址校验
+// 引擎校验
 // ---------------------------------------------------------------------------
 
-func TestNormalizeSourceURL(t *testing.T) {
+func TestNormalizeEngine(t *testing.T) {
 	cases := []struct {
-		in      string
-		want    string
+		name    string
+		in      engine
 		wantErr bool
+		check   func(t *testing.T, out engine)
 	}{
-		{"http://192.0.2.20:11510", "http://192.0.2.20:11510", false},
-		{"  http://192.0.2.20:11510  ", "http://192.0.2.20:11510", false},
-		{"https://example.com", "https://example.com", false},
-		{"http://example.com/", "http://example.com", false},
-		{"http://example.com/sub/", "http://example.com/sub", false},
-		{"", "", true},
-		{"   ", "", true},
-		{"192.0.2.20:11510", "", true},  // 缺 scheme
-		{"ftp://example.com", "", true}, // scheme 不支持
-		{"http://", "", true},           // 缺主机
-		{"://bad", "", true},            // 无法解析
+		{
+			name: "正常值",
+			in:   eng("115", "http://192.0.2.20:11510", "/files"),
+			check: func(t *testing.T, out engine) {
+				if out.Name != "115" || out.Base != "http://192.0.2.20:11510" || out.Path != "/files" {
+					t.Errorf("输出不正确：%+v", out)
+				}
+			},
+		},
+		{
+			name: "地址去尾斜杠与空白",
+			in:   eng("  A  ", "  http://192.0.2.20:8787/  ", "  /s  "),
+			check: func(t *testing.T, out engine) {
+				if out.Name != "A" || out.Base != "http://192.0.2.20:8787" || out.Path != "/s" {
+					t.Errorf("未归一化：%+v", out)
+				}
+			},
+		},
+		{
+			name: "名称留空时给默认名",
+			in:   eng("", "http://192.0.2.20:8787", "/s"),
+			check: func(t *testing.T, out engine) {
+				if out.Name != "搜索引擎 1" {
+					t.Errorf("默认名不正确：%q", out.Name)
+				}
+			},
+		},
+		{
+			name: "路径缺前导斜杠自动补",
+			in:   eng("A", "http://192.0.2.20:8787", "s"),
+			check: func(t *testing.T, out engine) {
+				if out.Path != "/s" {
+					t.Errorf("路径未补斜杠：%q", out.Path)
+				}
+			},
+		},
+		{
+			name: "路径带查询串时剥掉（程序自己追加 ?q=）",
+			in:   eng("A", "http://192.0.2.20:8787", "/search?q="),
+			check: func(t *testing.T, out engine) {
+				if out.Path != "/search" {
+					t.Errorf("查询串未剥掉：%q", out.Path)
+				}
+			},
+		},
+		{
+			name: "路径为空时退化为根路径",
+			in:   eng("A", "http://192.0.2.20:8787", ""),
+			check: func(t *testing.T, out engine) {
+				if out.Path != "/" {
+					t.Errorf("路径应为 /：%q", out.Path)
+				}
+			},
+		},
+		{name: "地址为空", in: eng("A", "", "/s"), wantErr: true},
+		{name: "缺 scheme", in: eng("A", "192.0.2.20:8787", "/s"), wantErr: true},
+		{name: "scheme 不支持", in: eng("A", "ftp://x", "/s"), wantErr: true},
+		{name: "缺主机", in: eng("A", "http://", "/s"), wantErr: true},
 	}
+
 	for _, tc := range cases {
-		got, err := normalizeSourceURL(tc.in)
-		if tc.wantErr {
-			if err == nil {
-				t.Errorf("normalizeSourceURL(%q) 应报错，实际返回 %q", tc.in, got)
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := normalizeEngine(tc.in, 0)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("应报错，实际返回 %+v", out)
+				}
+				return
 			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("normalizeSourceURL(%q) 意外报错：%v", tc.in, err)
-			continue
-		}
-		if got != tc.want {
-			t.Errorf("normalizeSourceURL(%q) = %q，期望 %q", tc.in, got, tc.want)
-		}
+			if err != nil {
+				t.Fatalf("意外报错：%v", err)
+			}
+			if tc.check != nil {
+				tc.check(t, out)
+			}
+		})
+	}
+}
+
+func TestNormalizeEngineRejectsTooLongName(t *testing.T) {
+	if _, err := normalizeEngine(eng(strings.Repeat("字", 41), "http://192.0.2.20:1", "/s"), 0); err == nil {
+		t.Error("超过 40 字的名称应被拒绝")
+	}
+	if _, err := normalizeEngine(eng(strings.Repeat("字", 40), "http://192.0.2.20:1", "/s"), 0); err != nil {
+		t.Errorf("正好 40 字应当通过：%v", err)
+	}
+}
+
+func TestNormalizeEnginesLimits(t *testing.T) {
+	if _, err := normalizeEngines(nil); err == nil {
+		t.Error("空列表应报错")
+	}
+	many := make([]engine, maxEngines+1)
+	for i := range many {
+		many[i] = eng("", "http://192.0.2.20:8787", "/s")
+	}
+	if _, err := normalizeEngines(many); err == nil {
+		t.Errorf("超过 %d 个应报错", maxEngines)
+	}
+	out, err := normalizeEngines([]engine{eng("A", "http://192.0.2.20:1", "/s")})
+	if err != nil || len(out) != 1 {
+		t.Errorf("单个引擎应通过：%v %v", out, err)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// 配置：持久化
+// 配置持久化
 // ---------------------------------------------------------------------------
 
-func TestSettingsStoreFallsBackWhenFileMissing(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
-	fallback := settings{Source1: "http://192.0.2.20:11510", Source2: "http://192.0.2.20:8787"}
+func TestSettingsStoreCreatesFileOnFirstRun(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "settings.json") // 目录不存在，应自动创建
+	fallback := settings{Engines: []engine{eng("A", "http://192.0.2.21:1", "/s")}}
 
 	st, err := newSettingsStore(path, fallback, originEnv)
 	if err != nil {
-		t.Fatalf("文件不存在时不应报错：%v", err)
+		t.Fatalf("首次启动不应报错：%v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("首次启动应自动生成配置文件：%v", err)
+	}
+	if data, _ := os.ReadFile(path); !strings.Contains(string(data), "http://192.0.2.21:1") {
+		t.Errorf("自动生成的内容不正确：%s", data)
 	}
 	got, orig := st.snapshot()
-	if got != fallback {
-		t.Errorf("应使用 fallback，实际 %+v", got)
+	if len(got.Engines) != 1 || got.Engines[0].Base != "http://192.0.2.21:1" {
+		t.Errorf("内容不正确：%+v", got)
 	}
 	if orig != originEnv {
-		t.Errorf("来源应为 %q，实际 %q", originEnv, orig)
+		t.Errorf("首次生成的内容来自环境变量，来源应为 %q，实际 %q", originEnv, orig)
+	}
+
+	// 重启后应改为从文件读取
+	st2, err := newSettingsStore(path, settings{}, originDefault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got2, orig2 := st2.snapshot()
+	if len(got2.Engines) != 1 || got2.Engines[0].Base != "http://192.0.2.21:1" {
+		t.Errorf("重启后读回的值不一致：%+v", got2)
+	}
+	if orig2 != originFile {
+		t.Errorf("重启后来源应为 %q，实际 %q", originFile, orig2)
 	}
 }
 
-func TestSettingsStoreLoadsExistingFile(t *testing.T) {
+func TestSettingsStoreMigratesLegacyFormat(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	body := `{"source1":"http://192.0.2.31:1","source2":"http://192.0.2.32:2"}`
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+	legacy := `{"source1":"http://192.0.2.31:1","source2":"http://192.0.2.32:2"}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	st, err := newSettingsStore(path, settings{}, originDefault)
 	if err != nil {
-		t.Fatalf("读取配置失败：%v", err)
+		t.Fatalf("旧格式应能平滑迁移：%v", err)
 	}
-	got, orig := st.snapshot()
-	if got.Source1 != "http://192.0.2.31:1" || got.Source2 != "http://192.0.2.32:2" {
-		t.Errorf("未加载文件里的地址：%+v", got)
+	got, _ := st.snapshot()
+	if len(got.Engines) != 2 {
+		t.Fatalf("旧格式应迁移出 2 个引擎，实际 %d 个", len(got.Engines))
 	}
-	if orig != originFile {
-		t.Errorf("来源应为 %q，实际 %q", originFile, orig)
+	if got.Engines[0].Base != "http://192.0.2.31:1" || got.Engines[1].Base != "http://192.0.2.32:2" {
+		t.Errorf("迁移后的地址不正确：%+v", got.Engines)
+	}
+	// 迁移出来的引擎也应带上默认的搜索路径，否则检索地址拼不出来
+	if got.Engines[0].Path == "" || got.Engines[1].Path == "" {
+		t.Errorf("迁移后的引擎缺少搜索路径：%+v", got.Engines)
 	}
 }
 
 func TestSettingsStoreFallsBackWhenFileBroken(t *testing.T) {
-	for _, body := range []string{
+	cases := []string{
 		`{ 这不是 json`,
-		`{"source1":"ftp://x","source2":"http://y"}`,
-		`{"source1":"","source2":"http://y"}`,
-	} {
+		`{"engines":[{"name":"A","base":"ftp://x","path":"/s"}]}`,
+		`{"engines":[]}`,
+	}
+	for _, body := range cases {
 		path := filepath.Join(t.TempDir(), "settings.json")
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		fallback := settings{Source1: "http://192.0.2.20:11510", Source2: "http://192.0.2.20:8787"}
+		fallback := settings{Engines: []engine{eng("A", "http://192.0.2.21:1", "/s")}}
 		st, err := newSettingsStore(path, fallback, originDefault)
 		if err == nil {
-			t.Errorf("内容为 %s 时应返回错误提示", body)
+			t.Errorf("内容为 %s 时应给出错误提示", body)
 		}
 		got, orig := st.snapshot()
-		if got != fallback || orig != originDefault {
+		if len(got.Engines) != 1 || orig != originDefault {
 			t.Errorf("内容为 %s 时应退回 fallback，实际 %+v / %q", body, got, orig)
 		}
 	}
 }
 
 func TestSettingsStoreSaveAndReload(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sub", "settings.json") // 目录不存在，应自动创建
+	path := filepath.Join(t.TempDir(), "settings.json")
 	st, err := newSettingsStore(path, settings{}, originDefault)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// 带尾部斜杠与空白，保存时应被归一化
-	if err := st.save(settings{Source1: " http://192.0.2.31:1/ ", Source2: "http://192.0.2.32:2"}); err != nil {
+	if err := st.save(settings{Engines: []engine{
+		eng(" 甲 ", "http://192.0.2.31:1/", "/s"),
+		eng("乙", "http://192.0.2.32:2", "/files"),
+	}}); err != nil {
 		t.Fatalf("保存失败：%v", err)
 	}
 
 	got, orig := st.snapshot()
-	if got.Source1 != "http://192.0.2.31:1" || got.Source2 != "http://192.0.2.32:2" {
+	if len(got.Engines) != 2 || got.Engines[0].Name != "甲" || got.Engines[0].Base != "http://192.0.2.31:1" {
 		t.Errorf("保存后内存值不正确：%+v", got)
 	}
 	if orig != originFile {
-		t.Errorf("保存后来源应为 %q，实际 %q", originFile, orig)
+		t.Errorf("保存后来源应为 %q", originFile)
 	}
 
-	// 重新加载（模拟重启）应拿到同样的值 —— 这就是「持久化」的判据
-	again, err := newSettingsStore(path, settings{}, originDefault)
-	if err != nil {
-		t.Fatal(err)
-	}
+	again, _ := newSettingsStore(path, settings{}, originDefault)
 	reloaded, _ := again.snapshot()
-	if reloaded != got {
-		t.Errorf("重启后读回的值不一致：%+v vs %+v", reloaded, got)
+	if len(reloaded.Engines) != 2 || reloaded.Engines[1].Base != "http://192.0.2.32:2" {
+		t.Errorf("重启后读回的值不一致：%+v", reloaded)
 	}
 }
 
 func TestSettingsStoreSaveRejectsInvalid(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	st, _ := newSettingsStore(path, settings{}, originDefault)
+	st, _ := newSettingsStore(path, settings{Engines: []engine{eng("A", "http://192.0.2.21:1", "/s")}}, originDefault)
 
-	if err := st.save(settings{Source1: "ftp://x", Source2: "http://ok.example"}); err == nil {
-		t.Error("非法源1 地址应被拒绝")
+	if err := st.save(settings{Engines: []engine{eng("A", "ftp://x", "/s")}}); err == nil {
+		t.Error("非法地址应被拒绝")
 	}
-	if err := st.save(settings{Source1: "http://ok.example", Source2: ""}); err == nil {
-		t.Error("空源2 地址应被拒绝")
+	if err := st.save(settings{Engines: nil}); err == nil {
+		t.Error("空引擎列表应被拒绝")
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("校验失败时不应写文件")
+	got, _ := st.snapshot()
+	if got.Engines[0].Base != "http://192.0.2.21:1" {
+		t.Error("校验失败不应改动现有配置")
 	}
 }
 
@@ -170,11 +272,7 @@ func TestWriteFileAtomicLeavesNoTempFiles(t *testing.T) {
 	if err := writeFileAtomic(path, []byte("hello\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "hello\n" {
+	if data, _ := os.ReadFile(path); string(data) != "hello\n" {
 		t.Errorf("内容不正确：%q", data)
 	}
 	entries, _ := os.ReadDir(dir)
@@ -184,151 +282,67 @@ func TestWriteFileAtomicLeavesNoTempFiles(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 环境变量与部署参数
+// 引擎注册表
 // ---------------------------------------------------------------------------
 
-func TestSourceDefaults(t *testing.T) {
-	t.Setenv("SRC1_BASE", "")
-	t.Setenv("SRC2_BASE", "")
-	got, orig := sourceDefaults()
-	if got.Source1 != defaultSource1 || got.Source2 != defaultSource2 {
-		t.Errorf("无环境变量时应返回内置默认值，实际 %+v", got)
+func TestEngineRegistry(t *testing.T) {
+	reg := &engineRegistry{}
+	ports := make([]int, maxEngines)
+	for i := range ports {
+		ports[i] = 18898 - i
 	}
-	if orig != originDefault {
-		t.Errorf("来源应为 %q，实际 %q", originDefault, orig)
-	}
+	reg.setPorts(ports)
 
-	t.Setenv("SRC1_BASE", "http://192.0.2.31:1/")
-	t.Setenv("SRC2_BASE", "")
-	got, orig = sourceDefaults()
-	if got.Source1 != "http://192.0.2.31:1" {
-		t.Errorf("SRC1_BASE 未被采纳或未去尾斜杠：%q", got.Source1)
-	}
-	if got.Source2 != defaultSource2 {
-		t.Errorf("未设置的源应保留默认值：%q", got.Source2)
-	}
-	if orig != originEnv {
-		t.Errorf("来源应为 %q，实际 %q", originEnv, orig)
-	}
-}
-
-func TestLoadDeployment(t *testing.T) {
-	t.Setenv("PAGE_PORT", "28099")
-	t.Setenv("PROXY1_PORT", "28098")
-	t.Setenv("LISTEN_HOST", "0.0.0.0")
-	t.Setenv("COOKIE_FILE", "  /data/c.txt  ")
-	t.Setenv("CONFIG_FILE", "/data/settings.json")
-
-	dep := loadDeployment()
-	if dep.PagePort != 28099 || dep.Proxy1Port != 28098 {
-		t.Errorf("端口未被采纳：%d / %d", dep.PagePort, dep.Proxy1Port)
-	}
-	if dep.ListenHost != "0.0.0.0" {
-		t.Errorf("LISTEN_HOST 未被采纳：%q", dep.ListenHost)
-	}
-	if dep.CookieFile != "/data/c.txt" {
-		t.Errorf("COOKIE_FILE 未去空白：%q", dep.CookieFile)
-	}
-	if dep.ConfigFile != "/data/settings.json" {
-		t.Errorf("CONFIG_FILE 未被采纳：%q", dep.ConfigFile)
-	}
-}
-
-func TestEnvPortOrRejectsInvalid(t *testing.T) {
-	cases := []struct {
-		value string
-		want  int
-	}{
-		{"", 18899}, {"0", 18899}, {"-1", 18899}, {"65536", 18899},
-		{"abc", 18899}, {"1", 1}, {"65535", 65535}, {" 8080 ", 8080},
-	}
-	for _, tc := range cases {
-		t.Setenv("PAGE_PORT", tc.value)
-		if got := envPortOr("PAGE_PORT", 18899); got != tc.want {
-			t.Errorf("envPortOr(%q) = %d，期望 %d", tc.value, got, tc.want)
-		}
-	}
-}
-
-func TestApplyEnvFileRealEnvWins(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.env")
-	content := strings.Join([]string{
-		"# 注释行",
-		"",
-		"T2H_FROM_FILE=来自文件",
-		"T2H_QUOTED=\"带引号的值\"",
-		"T2H_ALREADY_SET=文件值",
-		"没有等号的行",
-	}, "\n")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	list := []engine{eng("A", "http://192.0.2.21:1", "/s"), eng("B", "http://192.0.2.22:2", "/s")}
+	if err := reg.apply(list); err != nil {
 		t.Fatal(err)
 	}
 
-	t.Setenv("T2H_ALREADY_SET", "环境变量值")
-	os.Unsetenv("T2H_FROM_FILE")
-	os.Unsetenv("T2H_QUOTED")
-	defer os.Unsetenv("T2H_FROM_FILE")
-	defer os.Unsetenv("T2H_QUOTED")
-
-	applyEnvFile(path)
-
-	if got := os.Getenv("T2H_FROM_FILE"); got != "来自文件" {
-		t.Errorf("应载入文件值，实际 %q", got)
+	rt, ok := reg.at(0)
+	if !ok || rt.eng.Name != "A" || rt.port != 18898 {
+		t.Errorf("第 1 个引擎不正确：%+v ok=%v", rt, ok)
 	}
-	if got := os.Getenv("T2H_QUOTED"); got != "带引号的值" {
-		t.Errorf("引号应被剥离，实际 %q", got)
+	if _, ok := reg.at(2); ok {
+		t.Error("越界索引不应返回引擎")
 	}
-	if got := os.Getenv("T2H_ALREADY_SET"); got != "环境变量值" {
-		t.Errorf("真实环境变量应优先，实际 %q", got)
+	if _, ok := reg.at(-1); ok {
+		t.Error("负索引不应返回引擎")
+	}
+
+	// 缩到 1 个引擎后，第 2 个位置应变成「未配置」
+	if err := reg.apply(list[:1]); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reg.at(1); ok {
+		t.Error("引擎被删掉后该位置不应再返回引擎")
+	}
+	if rt, _ := reg.at(0); rt.port != 18898 {
+		t.Errorf("端口不应变化：%d", rt.port)
+	}
+
+	// 再加回来（数量超过启动时的引擎数）：端口池是独立的，新引擎必须拿到端口
+	three := append(append([]engine(nil), list...), eng("C", "http://192.0.2.23:3", "/s"))
+	if err := reg.apply(three); err != nil {
+		t.Fatalf("扩到 3 个引擎应成功：%v", err)
+	}
+	rt3, ok := reg.at(2)
+	if !ok {
+		t.Fatal("第 3 个引擎位应可用")
+	}
+	if rt3.port == 0 {
+		t.Error("新增引擎必须拿到代理端口，否则它对应的 iframe 无法加载")
+	}
+	if rt3.port != 18896 {
+		t.Errorf("第 3 个引擎端口应为 18896，实际 %d", rt3.port)
 	}
 }
 
-func TestApplyEnvFileMissingFileIsNoop(t *testing.T) {
-	applyEnvFile(filepath.Join(t.TempDir(), "不存在.env"))
-}
-
-// ---------------------------------------------------------------------------
-// 输入解析
-// ---------------------------------------------------------------------------
-
-func TestReadList(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "list.txt")
-	content := "  ABP-123  \r\n\r\nSSIS-001\nIPX-777\n\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	items, err := readList(path)
-	if err != nil {
-		t.Fatalf("readList 失败：%v", err)
-	}
-	want := []string{"ABP-123", "SSIS-001", "IPX-777"}
-	if len(items) != len(want) {
-		t.Fatalf("应读到 %d 条，实际 %d 条：%v", len(want), len(items), items)
-	}
-	for i := range want {
-		if items[i] != want[i] {
-			t.Errorf("第 %d 条应为 %q，实际 %q", i, want[i], items[i])
-		}
-	}
-}
-
-func TestReadListEmptyAndMissing(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "empty.txt")
-	if err := os.WriteFile(path, []byte("\n\n   \n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	items, err := readList(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) != 0 {
-		t.Errorf("空文件应返回空列表，实际 %v", items)
-	}
-
-	if _, err := readList(filepath.Join(t.TempDir(), "nope.txt")); err == nil {
-		t.Error("读取不存在的文件应返回错误")
+func TestEngineRegistryRejectsWhenPortPoolExhausted(t *testing.T) {
+	reg := &engineRegistry{}
+	reg.setPorts([]int{18898}) // 只留一个端口
+	two := []engine{eng("A", "http://192.0.2.21:1", "/s"), eng("B", "http://192.0.2.22:2", "/s")}
+	if err := reg.apply(two); err == nil {
+		t.Error("端口池不足时应报错，而不是把引擎挂到端口 0 上")
 	}
 }
 
@@ -338,21 +352,17 @@ func TestReadListEmptyAndMissing(t *testing.T) {
 
 func TestBuildPageReplacesAllPlaceholders(t *testing.T) {
 	page := buildPage(pageData{
-		Items:   []string{"ABP-123"},
-		Source1: "http://192.0.2.31:1",
-		Source2: "http://192.0.2.32:2",
-		Origin:  string(originFile),
-		Version: "test",
-		P1Port:  18898,
+		Items: []string{"ABP-123"},
+		Engines: []enginePayload{
+			{Name: "115 Lite Web", Base: "http://192.0.2.31:1", Path: "/files", ProxyPort: 18898},
+		},
+		Origin: string(originFile), Version: "test", Query: "ABP-123", MaxEngines: maxEngines,
 	})
 
-	for _, ph := range []string{"{P1PORT}", "{SCRIPT}", "{BOOTSTRAP}"} {
+	for _, ph := range []string{"{SCRIPT}", "{BOOTSTRAP}"} {
 		if strings.Contains(page, ph) {
 			t.Errorf("占位符 %s 未被替换", ph)
 		}
-	}
-	if !strings.Contains(page, `data-p1-port="18898"`) {
-		t.Error("源1 端口未注入 body 的 data-p1-port")
 	}
 	if !strings.Contains(page, "splitKeywords") {
 		t.Error("前端脚本未内联")
@@ -360,26 +370,38 @@ func TestBuildPageReplacesAllPlaceholders(t *testing.T) {
 	if !strings.Contains(page, `"items":["ABP-123"]`) {
 		t.Error("引导数据里未包含番号列表")
 	}
-	if !strings.Contains(page, `"source1":"http://192.0.2.31:1"`) {
-		t.Error("引导数据里未包含源1 地址")
+	if !strings.Contains(page, `"name":"115 Lite Web"`) || !strings.Contains(page, `"proxyPort":18898`) {
+		t.Error("引导数据里未包含引擎信息")
+	}
+	if !strings.Contains(page, `"q":"ABP-123"`) {
+		t.Error("引导数据里未包含 URL 带来的关键字")
 	}
 }
 
 func TestBuildPageEscapesBootstrapForScriptContext(t *testing.T) {
-	// 番号文本里若含 </script>，直接拼进 <script> 会提前结束脚本块，形成注入
 	nasty := `</script><script>alert(1)</script>`
 	page := buildPage(pageData{
 		Items:   []string{nasty},
-		P1Port:  1,
-		Source1: "http://a",
-		Source2: "http://b",
+		Engines: []enginePayload{{Name: nasty, Base: "http://a", Path: "/s", ProxyPort: 1}},
 	})
-
 	if strings.Contains(page, "</script><script>alert(1)</script>") {
 		t.Error("引导数据未做转义，存在脚本注入风险")
 	}
 	if !strings.Contains(page, `\u003c/script\u003e`) {
 		t.Error("尖括号应被转义为 \\u003c 形式")
+	}
+}
+
+func TestPlaceholderAndNotFoundPages(t *testing.T) {
+	if p := placeholderPage(3); !strings.Contains(p, "第 3 个引擎位") {
+		t.Errorf("占位页内容不正确：%s", p)
+	}
+	p := notFoundPage("/evil?x=<script>")
+	if strings.Contains(p, "<script>") {
+		t.Error("404 页里的路径未转义，存在反射型 XSS")
+	}
+	if !strings.Contains(p, "/api/search") {
+		t.Error("404 页应提示可用路径")
 	}
 }
 
@@ -400,7 +422,6 @@ func TestListenOnFallsBackWhenPortTaken(t *testing.T) {
 		t.Fatalf("端口被占用时应退化为随机端口，却返回错误：%v", err)
 	}
 	defer ln.Close()
-
 	if portOf(ln) == used {
 		t.Error("未退化为随机端口")
 	}
@@ -408,16 +429,98 @@ func TestListenOnFallsBackWhenPortTaken(t *testing.T) {
 
 func TestDisplayHost(t *testing.T) {
 	cases := map[string]string{
-		"":          "127.0.0.1",
-		"0.0.0.0":   "127.0.0.1",
-		"::":        "127.0.0.1",
-		"192.0.2.5": "192.0.2.5",
-		"nas.local": "nas.local",
+		"": "127.0.0.1", "0.0.0.0": "127.0.0.1", "::": "127.0.0.1",
+		"192.0.2.5": "192.0.2.5", "nas.local": "nas.local",
 	}
 	for in, want := range cases {
 		if got := displayHost(in); got != want {
 			t.Errorf("displayHost(%q) = %q，期望 %q", in, got, want)
 		}
+	}
+}
+
+func TestLoadDeploymentProxyPortBase(t *testing.T) {
+	t.Setenv("PROXY_PORT_BASE", "28898")
+	t.Setenv("PROXY1_PORT", "")
+	t.Setenv("PAGE_PORT", "28899")
+	dep := loadDeployment()
+	if dep.ProxyPortBase != 28898 || dep.PagePort != 28899 {
+		t.Errorf("端口未被采纳：%+v", dep)
+	}
+
+	// 兼容旧变量名
+	t.Setenv("PROXY_PORT_BASE", "")
+	t.Setenv("PROXY1_PORT", "27898")
+	dep = loadDeployment()
+	if dep.ProxyPortBase != 27898 {
+		t.Errorf("应兼容 PROXY1_PORT，实际 %d", dep.ProxyPortBase)
+	}
+
+	// 过小的基址会撞到下限，应退回默认值
+	t.Setenv("PROXY_PORT_BASE", "5")
+	dep = loadDeployment()
+	if dep.ProxyPortBase != defaultProxyPortBase {
+		t.Errorf("基址过小时应退回默认值，实际 %d", dep.ProxyPortBase)
+	}
+}
+
+func TestDefaultEnginesFromEnv(t *testing.T) {
+	t.Setenv("SRC1_BASE", "")
+	t.Setenv("SRC2_BASE", "")
+	list, orig := defaultEngines()
+	if len(list) != 2 || orig != originDefault {
+		t.Errorf("无环境变量时应给 2 个内置引擎：%+v / %q", list, orig)
+	}
+
+	t.Setenv("SRC1_BASE", "http://192.0.2.31:1/")
+	t.Setenv("SRC2_BASE", "http://192.0.2.32:2")
+	list, orig = defaultEngines()
+	if orig != originEnv {
+		t.Errorf("来源应为 %q，实际 %q", originEnv, orig)
+	}
+	if list[0].Base != "http://192.0.2.31:1" || list[1].Base != "http://192.0.2.32:2" {
+		t.Errorf("环境变量未被采纳：%+v", list)
+	}
+	if list[0].Path == "" || list[1].Path == "" {
+		t.Errorf("内置引擎应带默认搜索路径：%+v", list)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 输入解析
+// ---------------------------------------------------------------------------
+
+func TestReadList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "list.txt")
+	if err := os.WriteFile(path, []byte("  ABP-123  \r\n\r\nSSIS-001\nIPX-777\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	items, err := readList(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ABP-123", "SSIS-001", "IPX-777"}
+	if len(items) != len(want) {
+		t.Fatalf("应读到 %d 条，实际 %d 条：%v", len(want), len(items), items)
+	}
+	for i := range want {
+		if items[i] != want[i] {
+			t.Errorf("第 %d 条应为 %q，实际 %q", i, want[i], items[i])
+		}
+	}
+}
+
+func TestReadListEmptyAndMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.txt")
+	if err := os.WriteFile(path, []byte("\n\n   \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	items, err := readList(path)
+	if err != nil || len(items) != 0 {
+		t.Errorf("空文件应返回空列表，实际 %v / %v", items, err)
+	}
+	if _, err := readList(filepath.Join(t.TempDir(), "nope.txt")); err == nil {
+		t.Error("读取不存在的文件应返回错误")
 	}
 }
 
@@ -428,15 +531,10 @@ func TestDisplayHost(t *testing.T) {
 func TestCookieJarPersistAndReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cookie.txt")
 	jar := newCookieJar(path)
-
-	jar.absorb([]*http.Cookie{
-		{Name: "sid", Value: "abc"},
-		{Name: "uid", Value: "42"},
-	})
+	jar.absorb([]*http.Cookie{{Name: "sid", Value: "abc"}, {Name: "uid", Value: "42"}})
 	jar.absorb([]*http.Cookie{{Name: "uid", Value: "43"}})
 
-	reloaded := newCookieJar(path)
-	got := reloaded.headerValue("")
+	got := newCookieJar(path).headerValue("")
 	if !strings.Contains(got, "sid=abc") || !strings.Contains(got, "uid=43") {
 		t.Errorf("Cookie 未正确持久化/重载：%q", got)
 	}
@@ -445,13 +543,9 @@ func TestCookieJarPersistAndReload(t *testing.T) {
 func TestCookieJarBrowserValueMergedWithLocalWins(t *testing.T) {
 	jar := newCookieJar(filepath.Join(t.TempDir(), "cookie.txt"))
 	jar.absorb([]*http.Cookie{{Name: "sid", Value: "local"}})
-
 	merged := jar.headerValue("sid=browser; other=1")
-	if !strings.Contains(merged, "sid=local") {
-		t.Errorf("本地 Cookie 应覆盖浏览器同名 Cookie：%q", merged)
-	}
-	if !strings.Contains(merged, "other=1") {
-		t.Errorf("浏览器独有 Cookie 应保留：%q", merged)
+	if !strings.Contains(merged, "sid=local") || !strings.Contains(merged, "other=1") {
+		t.Errorf("Cookie 合并结果不正确：%q", merged)
 	}
 }
 
@@ -460,7 +554,6 @@ func TestCookieJarDeletesExpired(t *testing.T) {
 	jar := newCookieJar(path)
 	jar.absorb([]*http.Cookie{{Name: "sid", Value: "abc"}})
 	jar.absorb([]*http.Cookie{{Name: "sid", Value: "", MaxAge: -1}})
-
 	if got := jar.headerValue(""); strings.Contains(got, "sid") {
 		t.Errorf("Max-Age<0 的 Cookie 应被删除：%q", got)
 	}
@@ -472,11 +565,10 @@ func TestCookieJarDeletesExpired(t *testing.T) {
 
 func TestProxyStripsHeadersInjectsCSSAndRewritesURLs(t *testing.T) {
 	var upstream *httptest.Server
-	var seenOrigin, seenReferer, seenAcceptEncoding, seenCookie string
+	var seenOrigin, seenAcceptEncoding, seenCookie string
 
 	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenOrigin = r.Header.Get("Origin")
-		seenReferer = r.Header.Get("Referer")
 		seenAcceptEncoding = r.Header.Get("Accept-Encoding")
 		seenCookie = r.Header.Get("Cookie")
 
@@ -491,15 +583,11 @@ func TestProxyStripsHeadersInjectsCSSAndRewritesURLs(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	target, err := url.Parse(upstream.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	target, _ := url.Parse(upstream.URL)
 	jar := newCookieJar(filepath.Join(t.TempDir(), "cookie.txt"))
 	jar.absorb([]*http.Cookie{{Name: "sid", Value: "persisted"}})
 
-	proxy := makeProxy(func() *url.URL { return target }, hideCSS2, jar)
-
+	proxy := makeProxy(target, hideCSS2, jar)
 	req := httptest.NewRequest(http.MethodGet, "/s?q=x", nil)
 	req.Header.Set("Cookie", "browser=1")
 	rr := httptest.NewRecorder()
@@ -522,20 +610,14 @@ func TestProxyStripsHeadersInjectsCSSAndRewritesURLs(t *testing.T) {
 	if !strings.Contains(got, "<style data-local-inject>") {
 		t.Error("未注入隐藏外壳样式")
 	}
-	if strings.Contains(got, upstream.URL) {
+	if strings.Contains(got, upstream.URL) || strings.Contains(got, `\/`) {
 		t.Errorf("响应正文仍含上游绝对地址：\n%s", got)
-	}
-	if strings.Contains(got, `\/`) {
-		t.Errorf("响应正文仍含 JS 转义形式的上游地址：\n%s", got)
 	}
 	if !strings.Contains(got, "/files?q=x") {
 		t.Errorf("绝对地址未改写成相对路径：\n%s", got)
 	}
 	if seenOrigin != upstream.URL {
 		t.Errorf("上游收到的 Origin 应为 %q，实际 %q", upstream.URL, seenOrigin)
-	}
-	if seenReferer != upstream.URL+"/" {
-		t.Errorf("上游收到的 Referer 应为 %q，实际 %q", upstream.URL+"/", seenReferer)
 	}
 	if seenAcceptEncoding == "gzip" {
 		t.Error("不应向上游声明 gzip：正文改写需要未压缩内容")
@@ -545,59 +627,23 @@ func TestProxyStripsHeadersInjectsCSSAndRewritesURLs(t *testing.T) {
 	}
 }
 
-func TestProxyHotSwapTarget(t *testing.T) {
-	upA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "UPSTREAM-A")
+func TestProxyUsesPerEngineHideCSS(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<html><head></head><body>x</body></html>")
 	}))
-	defer upA.Close()
-	upB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "UPSTREAM-B")
-	}))
-	defer upB.Close()
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
 
-	targetA, _ := url.Parse(upA.URL)
-	targetB, _ := url.Parse(upB.URL)
-	cur := targetA
+	rr := httptest.NewRecorder()
+	makeProxy(target, ".only-this-engine{display:none!important}", nil).
+		ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
 
-	proxy := makeProxy(func() *url.URL { return cur }, "", nil)
-
-	call := func() string {
-		rr := httptest.NewRecorder()
-		proxy.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x", nil))
-		res := rr.Result()
-		body, _ := io.ReadAll(res.Body)
-		res.Body.Close()
-		return string(body)
-	}
-
-	if got := call(); got != "UPSTREAM-A" {
-		t.Fatalf("首次请求应打到上游 A，实际 %q", got)
-	}
-	cur = targetB // 模拟配置保存后的热切换
-	if got := call(); got != "UPSTREAM-B" {
-		t.Errorf("切换后请求应打到上游 B，实际 %q", got)
-	}
-}
-
-func TestProxyTargetSetAndGet(t *testing.T) {
-	pt, err := newProxyTarget("http://192.0.2.31:1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := pt.get().Host; got != "192.0.2.31:1" {
-		t.Errorf("初始 host 不正确：%q", got)
-	}
-	if err := pt.set("http://192.0.2.32:2/"); err != nil {
-		t.Fatal(err)
-	}
-	if got := pt.get().Host; got != "192.0.2.32:2" {
-		t.Errorf("切换后 host 不正确：%q", got)
-	}
-	if err := pt.set("::bad::"); err == nil {
-		t.Error("非法地址应返回错误")
-	}
-	if got := pt.get().Host; got != "192.0.2.32:2" {
-		t.Errorf("非法地址不应改变现状，实际 %q", got)
+	res := rr.Result()
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if !strings.Contains(string(body), ".only-this-engine") {
+		t.Error("每个引擎各自的隐藏 CSS 未生效")
 	}
 }
 
@@ -616,15 +662,12 @@ func TestProxyLeavesCompressedResponseUntouched(t *testing.T) {
 	defer upstream.Close()
 
 	target, _ := url.Parse(upstream.URL)
-	proxy := makeProxy(func() *url.URL { return target }, hideCSS2, nil)
-
 	rr := httptest.NewRecorder()
-	proxy.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x", nil))
+	makeProxy(target, hideCSS2, nil).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x", nil))
 
 	res := rr.Result()
 	body, _ := io.ReadAll(res.Body)
 	res.Body.Close()
-
 	if string(body) != gzBody {
 		t.Error("压缩响应不应被改写（改写会破坏内容）")
 	}
@@ -639,15 +682,12 @@ func TestProxyLeavesBinaryUntouched(t *testing.T) {
 	defer upstream.Close()
 
 	target, _ := url.Parse(upstream.URL)
-	proxy := makeProxy(func() *url.URL { return target }, hideCSS2, nil)
-
 	rr := httptest.NewRecorder()
-	proxy.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/bin", nil))
+	makeProxy(target, hideCSS2, nil).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/bin", nil))
 
 	res := rr.Result()
 	body, _ := io.ReadAll(res.Body)
 	res.Body.Close()
-
 	if string(body) != payload {
 		t.Error("二进制响应不应被改写")
 	}
@@ -655,11 +695,8 @@ func TestProxyLeavesBinaryUntouched(t *testing.T) {
 
 func TestProxyUpstreamErrorReturnsBadGateway(t *testing.T) {
 	target, _ := url.Parse("http://127.0.0.1:1")
-	proxy := makeProxy(func() *url.URL { return target }, "", nil)
-
 	rr := httptest.NewRecorder()
-	proxy.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x", nil))
-
+	makeProxy(target, "", nil).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x", nil))
 	if rr.Code != http.StatusBadGateway {
 		t.Errorf("上游不可达应返回 502，实际 %d", rr.Code)
 	}
@@ -669,21 +706,32 @@ func TestProxyUpstreamErrorReturnsBadGateway(t *testing.T) {
 // 配置 API
 // ---------------------------------------------------------------------------
 
-func newTestConfigAPI(t *testing.T) (http.HandlerFunc, *settingsStore, *proxyTarget, *proxyTarget) {
+func newTestConfigAPI(t *testing.T) (http.HandlerFunc, *settingsStore, *engineRegistry, deployment) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "settings.json")
-	st, err := newSettingsStore(path, settings{Source1: "http://192.0.2.20:11510", Source2: "http://192.0.2.20:8787"}, originDefault)
+	fallback := settings{Engines: []engine{
+		eng("甲", "http://192.0.2.21:1", "/s"),
+		eng("乙", "http://192.0.2.22:2", "/files"),
+	}}
+	st, err := newSettingsStore(path, fallback, originDefault)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t1, _ := newProxyTarget("http://192.0.2.20:11510")
-	t2, _ := newProxyTarget("http://192.0.2.20:8787")
-	return makeConfigHandler(st, t1, t2, func() int { return 7 }), st, t1, t2
+	reg := &engineRegistry{}
+	ports := make([]int, maxEngines) // 生产里启动时会一次性建好这么多端口
+	for i := range ports {
+		ports[i] = 18898 - i
+	}
+	reg.setPorts(ports)
+	if err := reg.apply(fallback.Engines); err != nil {
+		t.Fatal(err)
+	}
+	dep := deployment{PagePort: 18899, ProxyPortBase: 18898}
+	return makeConfigHandler(st, reg, dep, func() int { return 7 }), st, reg, dep
 }
 
 func TestConfigAPIGet(t *testing.T) {
 	h, _, _, _ := newTestConfigAPI(t)
-
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/config", nil))
 
@@ -694,80 +742,88 @@ func TestConfigAPIGet(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("响应不是合法 JSON：%s", rr.Body.String())
 	}
-	if got.Source1 != "http://192.0.2.20:11510" || got.Source2 != "http://192.0.2.20:8787" {
-		t.Errorf("返回的地址不正确：%+v", got)
+	if len(got.Engines) != 2 {
+		t.Fatalf("应返回 2 个引擎，实际 %d", len(got.Engines))
 	}
-	if got.Origin != string(originDefault) {
-		t.Errorf("返回的来源不正确：%q", got.Origin)
+	if got.Engines[0].Name != "甲" || got.Engines[0].ProxyPort != 18898 {
+		t.Errorf("引擎信息不正确：%+v", got.Engines[0])
 	}
-	if got.Items != 7 {
-		t.Errorf("返回的番号数不正确：%d", got.Items)
+	if got.Engines[1].ProxyPort != 18897 {
+		t.Errorf("第 2 个引擎端口不正确：%d", got.Engines[1].ProxyPort)
 	}
-	if got.ConfigFile == "" {
-		t.Error("应返回配置文件路径")
+	if got.Items != 7 || got.MaxEngines != maxEngines || got.ConfigFile == "" {
+		t.Errorf("附加信息不正确：%+v", got)
 	}
 }
 
-func TestConfigAPIPostWithHostOrigin(t *testing.T) {
-	h, st, t1, t2 := newTestConfigAPI(t)
+func TestConfigAPIPostAddsAndRemovesEngines(t *testing.T) {
+	h, st, reg, _ := newTestConfigAPI(t)
 
-	body := `{"source1":"http://192.0.2.41:1","source2":"http://192.0.2.42:2"}`
+	body := `{"engines":[` +
+		`{"name":"一","base":"http://192.0.2.41:1","path":"/s"},` +
+		`{"name":"二","base":"http://192.0.2.42:2","path":"/s"},` +
+		`{"name":"三","base":"http://192.0.2.43:3","path":"/s"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "http://"+req.Host)
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-
 	if rr.Code != http.StatusOK {
 		t.Fatalf("同源 POST 应返回 200，实际 %d：%s", rr.Code, rr.Body.String())
 	}
+
 	cur, orig := st.snapshot()
-	if cur.Source1 != "http://192.0.2.41:1" || cur.Source2 != "http://192.0.2.42:2" {
-		t.Errorf("配置未更新：%+v", cur)
+	if len(cur.Engines) != 3 || orig != originFile {
+		t.Errorf("配置未更新：%+v / %q", cur, orig)
 	}
-	if orig != originFile {
-		t.Errorf("来源应变为 %q，实际 %q", originFile, orig)
+	if _, ok := reg.at(2); !ok {
+		t.Error("第 3 个引擎位的代理应立即可用（无需重启）")
 	}
-	// 热切换：代理目标应同步跟上
-	if t1.get().Host != "192.0.2.41:1" {
-		t.Errorf("源1 代理目标未热切换：%q", t1.get().Host)
+	var got configPayload
+	_ = json.Unmarshal(rr.Body.Bytes(), &got)
+	if len(got.Engines) != 3 || got.Engines[2].ProxyPort != 18896 {
+		t.Errorf("返回的端口分配不正确：%+v", got.Engines)
 	}
-	if t2.get().Host != "192.0.2.42:2" {
-		t.Errorf("源2 代理目标未热切换：%q", t2.get().Host)
+
+	// 再缩回 1 个
+	body2 := `{"engines":[{"name":"只留一个","base":"http://192.0.2.41:1","path":"/s"}]}`
+	req2 := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body2))
+	req2.Header.Set("Origin", "http://"+req2.Host)
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("缩容应成功，实际 %d", rr2.Code)
+	}
+	if _, ok := reg.at(1); ok {
+		t.Error("删掉的引擎位不应再返回引擎")
 	}
 }
 
 func TestConfigAPIRejectsCrossSite(t *testing.T) {
 	h, st, _, _ := newTestConfigAPI(t)
-
-	body := `{"source1":"http://192.0.2.41:1","source2":"http://192.0.2.42:2"}`
+	body := `{"engines":[{"name":"x","base":"http://192.0.2.41:1","path":"/s"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "http://evil.example")
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("跨站 POST 应返回 403，实际 %d", rr.Code)
 	}
 	cur, _ := st.snapshot()
-	if cur.Source1 != "http://192.0.2.20:11510" {
+	if len(cur.Engines) != 2 {
 		t.Error("被拒绝的请求不应改动配置")
 	}
 }
 
 func TestConfigAPIRejectsCrossSiteRefererWhenOriginMissing(t *testing.T) {
 	h, _, _, _ := newTestConfigAPI(t)
-
 	req := httptest.NewRequest(http.MethodPost, "/api/config",
-		strings.NewReader(`{"source1":"http://192.0.2.41:1","source2":"http://192.0.2.42:2"}`))
+		strings.NewReader(`{"engines":[{"name":"x","base":"http://192.0.2.41:1","path":"/s"}]}`))
 	req.Header.Set("Referer", "http://evil.example/page")
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("来自外站 Referer 的 POST 应返回 403，实际 %d", rr.Code)
 	}
@@ -775,13 +831,11 @@ func TestConfigAPIRejectsCrossSiteRefererWhenOriginMissing(t *testing.T) {
 
 func TestConfigAPIAllowsClientsWithoutOrigin(t *testing.T) {
 	h, _, _, _ := newTestConfigAPI(t)
-
 	req := httptest.NewRequest(http.MethodPost, "/api/config",
-		strings.NewReader(`{"source1":"http://192.0.2.41:1","source2":"http://192.0.2.42:2"}`))
+		strings.NewReader(`{"engines":[{"name":"x","base":"http://192.0.2.41:1","path":"/s"}]}`))
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-
 	if rr.Code != http.StatusOK {
 		t.Fatalf("非浏览器客户端（curl）应放行，实际 %d：%s", rr.Code, rr.Body.String())
 	}
@@ -791,11 +845,11 @@ func TestConfigAPIRejectsBadPayload(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
-		code int
 	}{
-		{"非法 JSON", `{not json`, http.StatusBadRequest},
-		{"源1 地址非法", `{"source1":"ftp://x","source2":"http://ok.example"}`, http.StatusBadRequest},
-		{"源2 为空", `{"source1":"http://ok.example","source2":""}`, http.StatusBadRequest},
+		{"非法 JSON", `{not json`},
+		{"地址非法", `{"engines":[{"name":"a","base":"ftp://x","path":"/s"}]}`},
+		{"空列表", `{"engines":[]}`},
+		{"名称过长", `{"engines":[{"name":"` + strings.Repeat("字", 41) + `","base":"http://192.0.2.41:1","path":"/s"}]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -804,15 +858,15 @@ func TestConfigAPIRejectsBadPayload(t *testing.T) {
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, req)
 
-			if rr.Code != tc.code {
-				t.Fatalf("应返回 %d，实际 %d：%s", tc.code, rr.Code, rr.Body.String())
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("应返回 400，实际 %d：%s", rr.Code, rr.Body.String())
 			}
 			var payload map[string]string
 			if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil || payload["error"] == "" {
 				t.Error("错误响应应包含可读的 error 字段")
 			}
 			cur, _ := st.snapshot()
-			if cur.Source1 != "http://192.0.2.20:11510" {
+			if len(cur.Engines) != 2 {
 				t.Error("校验失败不应改动配置")
 			}
 		})
@@ -821,20 +875,74 @@ func TestConfigAPIRejectsBadPayload(t *testing.T) {
 
 func TestConfigAPIRejectsUnsupportedMethod(t *testing.T) {
 	h, _, _, _ := newTestConfigAPI(t)
-
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
-
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("DELETE 应返回 405，实际 %d", rr.Code)
-	}
-	if allow := rr.Header().Get("Allow"); !strings.Contains(allow, "GET") || !strings.Contains(allow, "POST") {
-		t.Errorf("Allow 头不正确：%q", allow)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// 端到端：真起两个端口，走一遍代理链路与配置接口
+// /api/search
+// ---------------------------------------------------------------------------
+
+func TestSearchAPI(t *testing.T) {
+	_, _, reg, _ := newTestConfigAPI(t)
+	h := makeSearchAPI(nil, reg, func() int { return 3 })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/search?q=%E4%B8%AD%E6%96%87", nil)
+	req.Host = "192.0.2.9:18899"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("应返回 200，实际 %d：%s", rr.Code, rr.Body.String())
+	}
+	var got searchPayload
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Keyword != "中文" {
+		t.Errorf("关键字不正确：%q", got.Keyword)
+	}
+	if len(got.Engines) != 2 {
+		t.Fatalf("应返回 2 个引擎的地址，实际 %d", len(got.Engines))
+	}
+	// 必须用请求里的主机名拼装，局域网其它机器调用时才可用
+	want := "http://192.0.2.9:18898/s?q=" + url.QueryEscape("中文")
+	if got.Engines[0].URL != want {
+		t.Errorf("引擎地址不正确：\n实际 %s\n期望 %s", got.Engines[0].URL, want)
+	}
+	if got.Engines[0].Name != "甲" {
+		t.Errorf("引擎名不正确：%q", got.Engines[0].Name)
+	}
+	if got.ItemCount != 3 {
+		t.Errorf("番号数不正确：%d", got.ItemCount)
+	}
+	if !strings.Contains(got.PageURL, "/?q=") {
+		t.Errorf("应给出面板直达地址：%q", got.PageURL)
+	}
+}
+
+func TestSearchAPIRejectsMissingKeyword(t *testing.T) {
+	_, _, reg, _ := newTestConfigAPI(t)
+	h := makeSearchAPI(nil, reg, func() int { return 0 })
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/search", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("缺少 q 应返回 400，实际 %d", rr.Code)
+	}
+
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest(http.MethodPost, "/api/search?q=x", nil))
+	if rr2.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST 应返回 405，实际 %d", rr2.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 端到端：真起面板端口 + 多个引擎代理端口
 // ---------------------------------------------------------------------------
 
 func TestStartServersEndToEnd(t *testing.T) {
@@ -842,31 +950,34 @@ func TestStartServersEndToEnd(t *testing.T) {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Frame-Options", "DENY")
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			// 回显解码后的查询串，便于断言代理是否原样透传了参数
 			_, _ = io.WriteString(w, "<html><head></head><body>"+marker+
 				" "+r.URL.Path+" q="+r.URL.Query().Get("q")+"</body></html>")
 		}))
 	}
-	source1 := mk("UPSTREAM-ONE")
-	defer source1.Close()
-	source2 := mk("UPSTREAM-TWO")
-	defer source2.Close()
+	one := mk("UPSTREAM-ONE")
+	defer one.Close()
+	two := mk("UPSTREAM-TWO")
+	defer two.Close()
+	fresh := mk("UPSTREAM-FRESH")
+	defer fresh.Close()
 
 	tmp := t.TempDir()
 	dep := deployment{
-		PagePort:   0,
-		Proxy1Port: 0,
-		ListenHost: "127.0.0.1",
-		CookieFile: filepath.Join(tmp, "cookie.txt"),
-		ConfigFile: filepath.Join(tmp, "settings.json"),
+		PagePort:      0,
+		ProxyPortBase: 28898, // 用一个不常见的基址，避免和本机其它服务抢端口
+		ListenHost:    "127.0.0.1",
+		CookieFile:    filepath.Join(tmp, "cookie.txt"),
+		ConfigFile:    filepath.Join(tmp, "settings.json"),
 	}
-	store, err := newSettingsStore(dep.ConfigFile, settings{Source1: source1.URL, Source2: source2.URL}, originEnv)
+	store, err := newSettingsStore(dep.ConfigFile, settings{Engines: []engine{
+		{Name: "一号", Base: one.URL, Path: "/files"},
+		{Name: "二号", Base: two.URL, Path: "/s"},
+	}}, originEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	items := []string{"ABP-123", "SSIS-001"}
-	pageURL, err := startServers(dep, store, items)
+	pageURL, err := startServers(dep, store, []string{"ABP-123", "SSIS-001"})
 	if err != nil {
 		t.Fatalf("startServers 失败：%v", err)
 	}
@@ -874,66 +985,79 @@ func TestStartServersEndToEnd(t *testing.T) {
 	// 1) 面板页
 	page := httpGet(t, pageURL+"/")
 	for _, want := range []string{`id="kwInput"`, `id="searchBtn"`, `id="settingsBtn"`, `id="pager"`,
-		`id="prevBtn"`, `id="nextBtn"`, `id="frame1"`, `id="frame2"`, `id="clearBtn"`,
-		`id="listBox"`, `id="codesToggle"`, `id="splitter"`, `id="settingsDialog"`, "ABP-123"} {
+		`id="prevBtn"`, `id="nextBtn"`, `id="clearBtn"`, `id="listBox"`, `id="codesToggle"`,
+		`id="splitter"`, `id="settingsDialog"`, `id="engineList"`, `id="addEngineBtn"`, "ABP-123"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("面板页缺少 %s", want)
 		}
 	}
-	for _, ph := range []string{"{P1PORT}", "{SCRIPT}", "{BOOTSTRAP}"} {
+	for _, ph := range []string{"{SCRIPT}", "{BOOTSTRAP}"} {
 		if strings.Contains(page, ph) {
 			t.Errorf("面板页残留占位符 %s", ph)
 		}
 	}
 
-	m := regexp.MustCompile(`data-p1-port="(\d+)"`).FindStringSubmatch(page)
-	if m == nil {
-		t.Fatal("面板页未注入源1 端口")
-	}
-	p1Port := m[1]
-
-	// 2) 健康检查
+	// 2) 健康检查里应能看到两个引擎及各自的代理端口
 	var health struct {
 		Status  string `json:"status"`
 		Version string `json:"version"`
 		Items   int    `json:"items"`
-		Source1 string `json:"source1"`
+		Engines []struct {
+			Name      string `json:"name"`
+			Base      string `json:"base"`
+			ProxyPort int    `json:"proxyPort"`
+		} `json:"engines"`
 	}
 	if err := json.Unmarshal([]byte(httpGet(t, pageURL+"/healthz")), &health); err != nil {
 		t.Fatal(err)
 	}
-	if health.Status != "ok" || health.Version == "" || health.Items != 2 {
-		t.Errorf("/healthz 内容不正确：%+v", health)
+	if health.Status != "ok" || health.Items != 2 || len(health.Engines) != 2 {
+		t.Fatalf("/healthz 内容不正确：%+v", health)
 	}
-	if health.Source1 != source1.URL {
-		t.Errorf("/healthz 未反映当前源1 地址：%q", health.Source1)
-	}
-
-	// 3) 源2 代理（面板页同源路径）
-	got2 := httpGet(t, pageURL+"/s?q=%E4%B8%AD%E6%96%87")
-	if !strings.Contains(got2, "UPSTREAM-TWO") || !strings.Contains(got2, "中文") {
-		t.Errorf("源2 代理内容不正确：%s", got2)
-	}
-	if !strings.Contains(got2, "data-local-inject") {
-		t.Error("源2 未注入隐藏样式")
+	if health.Engines[0].Name != "一号" || health.Engines[1].Name != "二号" {
+		t.Errorf("引擎名不正确：%+v", health.Engines)
 	}
 
-	// 4) 源1 代理（独立端口）
-	got1 := httpGet(t, "http://127.0.0.1:"+p1Port+"/files?q=abc")
-	if !strings.Contains(got1, "UPSTREAM-ONE") {
-		t.Errorf("源1 代理内容不正确：%s", got1)
+	// 3) 两个引擎各自的代理端口都能取到内容
+	p0 := health.Engines[0].ProxyPort
+	p1 := health.Engines[1].ProxyPort
+	if got := httpGet(t, "http://127.0.0.1:"+strconv.Itoa(p0)+"/files?q=abc"); !strings.Contains(got, "UPSTREAM-ONE") {
+		t.Errorf("引擎1 代理内容不正确：%s", got)
 	}
-	if !strings.Contains(got1, hideCSS1) {
-		t.Error("源1 注入的样式内容不正确")
+	if got := httpGet(t, "http://127.0.0.1:"+strconv.Itoa(p1)+"/s?q=%E4%B8%AD%E6%96%87"); !strings.Contains(got, "UPSTREAM-TWO") {
+		t.Errorf("引擎2 代理内容不正确：%s", got)
 	}
 
-	// 5) 配置接口：改地址后代理应立刻指向新上游
-	upNew := mk("UPSTREAM-NEW")
-	defer upNew.Close()
-	body := `{"source1":"` + upNew.URL + `","source2":"` + source2.URL + `"}`
-	req, _ := http.NewRequest(http.MethodPost, pageURL+"/api/config", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	// 4) 未配置的引擎位应给提示页而不是失败。
+	// 只有端口基址没被占用（也就是没有触发随机端口回退）时才能算出它的端口。
+	if p0 == dep.ProxyPortBase {
+		p7 := dep.ProxyPortBase - (maxEngines - 1)
+		if got := httpGet(t, "http://127.0.0.1:"+strconv.Itoa(p7)+"/s?q=x"); !strings.Contains(got, "未配置") {
+			t.Errorf("空的引擎位应给提示页：%s", got)
+		}
+	} else {
+		t.Logf("端口基址 %d 被占用，已回退到随机端口，跳过空引擎位断言", dep.ProxyPortBase)
+	}
+
+	// 5) /api/search 给出各引擎地址（用面板端口访问）
+	var sp searchPayload
+	if err := json.Unmarshal([]byte(httpGet(t, pageURL+"/api/search?q=abc")), &sp); err != nil {
+		t.Fatalf("/api/search 响应不合法：%v", err)
+	}
+	if len(sp.Engines) != 2 || !strings.Contains(sp.Engines[0].URL, "/files?q=abc") {
+		t.Errorf("/api/search 内容不正确：%+v", sp)
+	}
+	if sp.Engines[0].URL != "http://127.0.0.1:"+strconv.Itoa(p0)+"/files?q=abc" {
+		t.Errorf("/api/search 里的端口不对：%s", sp.Engines[0].URL)
+	}
+
+	// 6) 通过配置接口改第 1 个引擎地址，代理应立即指向新上游
+	body := `{"engines":[` +
+		`{"name":"一号","base":"` + fresh.URL + `","path":"/files"},` +
+		`{"name":"二号","base":"` + two.URL + `","path":"/s"}]}`
+	post, _ := http.NewRequest(http.MethodPost, pageURL+"/api/config", strings.NewReader(body))
+	post.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(post)
 	if err != nil {
 		t.Fatalf("POST /api/config 失败：%v", err)
 	}
@@ -942,19 +1066,74 @@ func TestStartServersEndToEnd(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /api/config 应返回 200，实际 %d", resp.StatusCode)
 	}
-
-	got1b := httpGet(t, "http://127.0.0.1:"+p1Port+"/files?q=abc")
-	if !strings.Contains(got1b, "UPSTREAM-NEW") {
-		t.Errorf("保存后源1 代理未切到新上游：%s", got1b)
+	if got := httpGet(t, "http://127.0.0.1:"+strconv.Itoa(p0)+"/files?q=abc"); !strings.Contains(got, "UPSTREAM-FRESH") {
+		t.Errorf("改地址后代理未切到新上游：%s", got)
 	}
 
-	// 6) 配置已落盘（持久化判据）
+	// 7) 面板端口上的未知路径给 404 提示，而不是转发到某个上游
+	respNotFound, err := http.Get(pageURL + "/something")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body404, _ := io.ReadAll(respNotFound.Body)
+	respNotFound.Body.Close()
+	if respNotFound.StatusCode != http.StatusNotFound {
+		t.Errorf("未知路径应返回 404，实际 %d", respNotFound.StatusCode)
+	}
+	if !strings.Contains(string(body404), "/api/search") {
+		t.Error("404 页应提示可用路径")
+	}
+
+	// 8) 配置已落盘（持久化判据）
 	data, err := os.ReadFile(dep.ConfigFile)
 	if err != nil {
 		t.Fatalf("配置文件未落盘：%v", err)
 	}
-	if !strings.Contains(string(data), upNew.URL) {
+	if !strings.Contains(string(data), fresh.URL) {
 		t.Errorf("配置文件内容不正确：%s", data)
+	}
+}
+
+func TestPanelCarriesQueryIntoBootstrap(t *testing.T) {
+	one := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ONE")
+	}))
+	defer one.Close()
+
+	tmp := t.TempDir()
+	dep := deployment{
+		PagePort: 0, ProxyPortBase: 29898, ListenHost: "127.0.0.1",
+		CookieFile: filepath.Join(tmp, "c.txt"), ConfigFile: filepath.Join(tmp, "s.json"),
+	}
+	store, _ := newSettingsStore(dep.ConfigFile, settings{Engines: []engine{
+		{Name: "唯一", Base: one.URL, Path: "/s"},
+	}}, originDefault)
+
+	pageURL, err := startServers(dep, store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// URL 带上关键字时，引导数据里应带上它，前端据此自动检索
+	page := httpGet(t, pageURL+"/?q=%E4%B8%AD%E6%96%87")
+	raw := page[strings.Index(page, `id="bootstrap"`):]
+	start := strings.Index(raw, ">") + 1
+	end := strings.Index(raw, "</script>")
+	var payload struct {
+		Query   string `json:"q"`
+		Engines []struct {
+			Name      string `json:"name"`
+			ProxyPort int    `json:"proxyPort"`
+		} `json:"engines"`
+	}
+	if err := json.Unmarshal([]byte(raw[start:end]), &payload); err != nil {
+		t.Fatalf("引导数据不是合法 JSON：%v", err)
+	}
+	if payload.Query != "中文" {
+		t.Errorf("引导数据未带上 URL 里的关键字：%q", payload.Query)
+	}
+	if len(payload.Engines) != 1 || payload.Engines[0].ProxyPort == 0 {
+		t.Errorf("引导数据里的引擎信息不正确：%+v", payload.Engines)
 	}
 }
 

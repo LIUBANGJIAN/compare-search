@@ -20,3 +20,8 @@ web/panel.test.js
 
 # 文档
 *.md
+
+# 本地实际部署文件（镜像里用不到）
+实际compose.yaml
+env.yaml
+.env

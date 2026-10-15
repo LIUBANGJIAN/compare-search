@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>双引擎搜索</title>
+    <title>多引擎搜索</title>
     <style>
         * { box-sizing: border-box; }
+        html, body { height: 100%; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
             background-color: #f4f6f8;
@@ -15,7 +16,8 @@
         .container {
             display: flex;
             flex-direction: column;
-            min-height: calc(100vh - 28px);
+            /* 固定为视口高度：这样番号栏内部才会滚动，而不是把整页撑长 */
+            height: calc(100vh - 28px);
             max-width: 1800px;
             margin: 0 auto;
             padding: 14px 16px 16px;
@@ -31,6 +33,7 @@
             align-items: flex-start;
             gap: 8px;
             margin-bottom: 8px;
+            flex: 0 0 auto;
         }
         #kwInput {
             flex: 1 1 380px;
@@ -65,12 +68,7 @@
             white-space: nowrap;
         }
         .btn:hover { border-color: #0066cc; color: #0066cc; background: #ebf5ff; }
-        .btn-primary {
-            color: #fff;
-            background: #0066cc;
-            border-color: #0066cc;
-            font-weight: 600;
-        }
+        .btn-primary { color: #fff; background: #0066cc; border-color: #0066cc; font-weight: 600; }
         .btn-primary:hover { background: #0055aa; border-color: #0055aa; color: #fff; }
         .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
 
@@ -87,6 +85,7 @@
             background: #f8fafc;
             border: 1px solid #e2e8f0;
             border-radius: 8px;
+            flex: 0 0 auto;
         }
         .pager[hidden] { display: none; }
         .pager button {
@@ -109,36 +108,76 @@
         /* ---------- 主体三栏 ---------- */
         .layout {
             --codes-width: 216px;
-            flex: 1;
+            flex: 1 1 auto;
             display: flex;
             gap: 0;
-            min-height: 460px;
+            min-height: 0;   /* 关键：flex 子项默认 min-height:auto，不置 0 就撑高整页 */
         }
         .results-col {
-            flex: 1;
+            flex: 1 1 auto;
             display: flex;
             flex-direction: column;
             gap: 12px;
             min-width: 0;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
         }
         .panel {
-            flex: 1;
+            flex: 1 1 0;
             display: flex;
             flex-direction: column;
             border: 1px solid #e2e8f0;
             border-radius: 8px;
             overflow: hidden;
             background: #fff;
+            min-height: 170px;
         }
         .panel-header {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
             padding: 6px 12px;
             background: #f8fafc;
             border-bottom: 1px solid #e2e8f0;
             font-size: 0.85rem;
-            font-weight: 600;
             color: #334155;
+            flex: 0 0 auto;
         }
-        .panel iframe { flex: 1; width: 100%; border: 0; background: #fff; }
+        .panel-header .eng-name { font-weight: 600; }
+        .panel-header .eng-base {
+            font-size: 0.75rem;
+            color: #94a3b8;
+            font-weight: 400;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .frame-wrap { position: relative; flex: 1 1 auto; min-height: 0; }
+        .frame-wrap iframe {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            border: 0;
+            background: #fff;
+            /* 预取槽位用 visibility 隐藏：display:none 在部分浏览器会暂停加载 */
+            visibility: hidden;
+        }
+        .frame-wrap iframe.engine-frame-active { visibility: visible; }
+        .frame-status {
+            position: absolute;
+            top: 8px;
+            right: 10px;
+            padding: 3px 10px;
+            font-size: 0.75rem;
+            color: #0066cc;
+            background: rgba(235, 245, 255, 0.95);
+            border: 1px solid #b5d4f4;
+            border-radius: 999px;
+            pointer-events: none;
+        }
+        .frame-status[hidden] { display: none; }
 
         /* 拖拽手柄 */
         .splitter {
@@ -167,6 +206,7 @@
             overflow: hidden;
             background: #fff;
             min-width: 0;
+            min-height: 0;   /* 让内部 .list-box 自己滚动 */
         }
         .codes-header {
             display: flex;
@@ -179,9 +219,9 @@
             font-size: 0.85rem;
             font-weight: 600;
             color: #334155;
+            flex: 0 0 auto;
         }
         .codes-header .count { color: #94a3b8; font-weight: 400; }
-        .codes-header .actions { display: flex; gap: 4px; }
         .clear-btn {
             padding: 3px 8px;
             font: inherit;
@@ -197,19 +237,16 @@
         }
         .clear-btn:hover { background: #ebf5ff; border-color: #0066cc; color: #0066cc; }
         .list-box {
-            flex: 1;
-            overflow-y: auto;
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;      /* 番号多时在这里滚动，不撑长页面 */
+            overscroll-behavior: contain;
             padding: 8px;
             display: flex;
             flex-direction: column;
             gap: 4px;
         }
-        .list-empty {
-            padding: 10px 6px;
-            color: #94a3b8;
-            font-size: 0.8rem;
-            line-height: 1.7;
-        }
+        .list-empty { padding: 10px 6px; color: #94a3b8; font-size: 0.8rem; line-height: 1.7; flex: 0 0 auto; }
         .data-line {
             display: block;
             padding: 6px 9px;
@@ -223,9 +260,9 @@
             transition: all 0.15s ease;
             word-break: break-all;
             cursor: pointer;
+            flex: 0 0 auto;
         }
         .data-line:hover { background: #ebf5ff; border-color: #0066cc; }
-        /* 当前正在查看的那一条 */
         .data-line.current {
             color: #0f172a;
             font-weight: 600;
@@ -233,7 +270,6 @@
             border-color: #b5d4f4;
             border-left-color: #0066cc;
         }
-        /* 已经看过的（含当前） */
         .data-line.clicked { color: #dc2626; border-color: #fca5a5; background: #fef2f2; }
         .data-line.clicked.current { color: #b91c1c; background: #fee2e2; border-left-color: #dc2626; }
 
@@ -261,71 +297,84 @@
 
         /* ---------- 设置对话框 ---------- */
         dialog.settings {
-            width: min(560px, calc(100vw - 32px));
+            width: min(780px, calc(100vw - 32px));
+            max-height: 86vh;
             padding: 0;
             border: 0;
             border-radius: 12px;
             box-shadow: 0 12px 40px rgba(15, 23, 42, 0.22);
             color: #1f2937;
             font-family: inherit;
+            overflow: hidden;
         }
         dialog.settings::backdrop { background: rgba(15, 23, 42, 0.35); }
-        dialog.settings .body { padding: 20px 22px 18px; }
-        dialog.settings h2 {
-            margin: 0 0 4px;
-            font-size: 1rem;
-            font-weight: 600;
+        dialog.settings .body { display: flex; flex-direction: column; max-height: 86vh; padding: 20px 22px 16px; }
+        dialog.settings h2 { margin: 0 0 4px; font-size: 1rem; font-weight: 600; }
+        dialog.settings .sub { margin: 0 0 14px; font-size: 0.8rem; color: #64748b; line-height: 1.6; }
+        dialog.settings code { background: #f1f5f9; padding: 1px 5px; border-radius: 4px; font-size: 0.78rem; }
+        #engineList { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding-right: 2px; }
+        .engine-row {
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 10px 12px;
+            margin-bottom: 10px;
+            background: #fcfdfe;
         }
-        dialog.settings .sub {
-            margin: 0 0 16px;
-            font-size: 0.8rem;
-            color: #64748b;
-            line-height: 1.6;
-        }
-        dialog.settings label {
-            display: block;
-            margin-bottom: 12px;
-            font-size: 0.82rem;
-            font-weight: 600;
-            color: #334155;
-        }
-        dialog.settings input[type="text"] {
+        .engine-row .row-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
+        .engine-row label { display: block; font-size: 0.75rem; font-weight: 600; color: #64748b; }
+        .engine-row input[type="text"], .engine-row textarea {
             display: block;
             width: 100%;
-            margin-top: 5px;
-            padding: 9px 11px;
+            margin-top: 4px;
+            padding: 7px 9px;
             font: inherit;
-            font-size: 0.86rem;
+            font-size: 0.84rem;
             font-weight: 400;
             color: #1f2937;
             background: #fff;
             border: 1px solid #cbd5e1;
-            border-radius: 8px;
+            border-radius: 7px;
             outline: none;
         }
-        dialog.settings input[type="text"]:focus {
+        .engine-row input[type="text"]:focus, .engine-row textarea:focus {
             border-color: #0066cc;
             box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.12);
         }
-        .hint {
-            margin: 0;
-            min-height: 1.4em;
+        .engine-row textarea { resize: vertical; min-height: 54px; font-size: 0.78rem; line-height: 1.5; }
+        .f-name { flex: 0 0 150px; }
+        .f-base { flex: 1 1 260px; }
+        .f-path { flex: 0 0 120px; }
+        .engine-row details { margin-top: 8px; }
+        .engine-row summary { font-size: 0.76rem; color: #64748b; cursor: pointer; user-select: none; }
+        .del-btn {
+            flex: 0 0 auto;
+            margin-top: 18px;
+            padding: 7px 10px;
+            font: inherit;
             font-size: 0.78rem;
-            line-height: 1.6;
-            color: #64748b;
-            word-break: break-all;
+            color: #b91c1c;
+            background: #fff;
+            border: 1px solid #fca5a5;
+            border-radius: 7px;
+            cursor: pointer;
         }
+        .del-btn:hover { background: #fef2f2; }
+        .hint { margin: 0; min-height: 1.4em; font-size: 0.78rem; line-height: 1.6; color: #64748b; word-break: break-all; }
         .hint.error { color: #dc2626; }
         .hint.ok { color: #0f6e56; }
         .dialog-actions {
             display: flex;
-            justify-content: flex-end;
+            align-items: center;
             gap: 8px;
-            margin-top: 16px;
+            margin-top: 14px;
+            padding-top: 12px;
+            border-top: 1px solid #e2e8f0;
+            flex: 0 0 auto;
         }
+        .dialog-actions .spacer { flex: 1 1 auto; }
     </style>
 </head>
-<body data-p1-port="{P1PORT}">
+<body>
     <script id="bootstrap" type="application/json">{BOOTSTRAP}</script>
 
     <div class="container">
@@ -344,25 +393,14 @@
         </div>
 
         <div class="layout" id="layout">
-            <div class="results-col">
-                <div class="panel">
-                    <div class="panel-header">搜索结果1</div>
-                    <iframe id="frame1" src="about:blank"></iframe>
-                </div>
-                <div class="panel">
-                    <div class="panel-header">搜索结果2</div>
-                    <iframe id="frame2" src="about:blank"></iframe>
-                </div>
-            </div>
+            <div class="results-col" id="resultsCol"></div>
 
             <div class="splitter" id="splitter" title="拖动调整宽度，双击复位"></div>
 
             <div class="codes-col" id="codesCol">
                 <div class="codes-header">
                     <span>番号 <span class="count" id="codesCount">0</span></span>
-                    <span class="actions">
-                        <button class="clear-btn" id="clearBtn" type="button">清空</button>
-                    </span>
+                    <span><button class="clear-btn" id="clearBtn" type="button">清空</button></span>
                 </div>
                 <div class="list-box" id="listBox"></div>
             </div>
@@ -373,16 +411,14 @@
 
     <dialog class="settings" id="settingsDialog">
         <div class="body">
-            <h2>上游地址设置</h2>
-            <p class="sub">保存后立即生效，并写入配置文件持久化。部署参数（端口、监听地址）仍需通过环境变量设置。</p>
-            <label>源1 地址
-                <input id="src1Input" type="text" spellcheck="false" placeholder="http://192.0.2.20:11510">
-            </label>
-            <label>源2 地址
-                <input id="src2Input" type="text" spellcheck="false" placeholder="http://192.0.2.20:8787">
-            </label>
+            <h2>搜索引擎设置</h2>
+            <p class="sub">可添加任意多个搜索引擎。保存后立即生效并写入配置文件持久化。
+                搜索路径是引擎自己的检索地址，程序会自动在后面追加 <code>?q=关键字</code>。</p>
+            <div id="engineList"></div>
             <p class="hint" id="settingsHint"></p>
             <div class="dialog-actions">
+                <button class="btn" id="addEngineBtn" type="button">+ 新增搜索引擎</button>
+                <span class="spacer"></span>
                 <button class="btn" id="settingsCancel" type="button">取消</button>
                 <button class="btn btn-primary" id="settingsSave" type="button">保存并生效</button>
             </div>
