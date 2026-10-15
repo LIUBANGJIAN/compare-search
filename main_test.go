@@ -330,6 +330,85 @@ func TestBuildPageCarriesHidePresets(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 隐藏站点外壳的注入
+// ---------------------------------------------------------------------------
+
+func TestHideSelectors(t *testing.T) {
+	cases := map[string]string{
+		"header,aside,footer{display:none!important}":                 "header,aside,footer",
+		"header{display:none!important}aside{display:none!important}": "header,aside",
+		`[data-sidebar="sidebar"]{display:none!important}`:            `[data-sidebar="sidebar"]`,
+		"   ": "",
+		"":    "",
+	}
+	for in, want := range cases {
+		if got := hideSelectors(in); got != want {
+			t.Errorf("hideSelectors(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+func TestInjectHidePlacesBlockAtEndOfBody(t *testing.T) {
+	page := "<!DOCTYPE html><html><head><style>header{display:flex!important}</style></head>" +
+		"<body><header>顶栏</header><main>正文</main></body></html>"
+	out := injectHide(page, "header{display:none!important}")
+
+	if !strings.Contains(out, "<style data-local-inject>") {
+		t.Fatal("未注入隐藏样式")
+	}
+	if !strings.Contains(out, "<script data-local-inject>") {
+		t.Fatal("未注入行内 !important 兜底脚本")
+	}
+	// 关键：注入块必须在 </body> 之前、且在文档已有的样式之后 ——
+	// 同优先级同时 !important 时后出现的胜出，这样才压得住站点自己的规则
+	block := strings.Index(out, "data-local-inject")
+	siteStyle := strings.Index(out, "header{display:flex!important}")
+	bodyEnd := strings.Index(out, "</body>")
+	if !(siteStyle < block && block < bodyEnd) {
+		t.Errorf("注入位置不对：站点样式=%d 注入=%d </body>=%d", siteStyle, block, bodyEnd)
+	}
+	if !strings.HasPrefix(out, "<!DOCTYPE html>") {
+		t.Error("不应把 DOCTYPE 挤到后面（会让页面进怪异模式）")
+	}
+}
+
+func TestInjectHideFallbacks(t *testing.T) {
+	// 没有 </body> 时退到 </html> 前
+	out := injectHide("<html><body>x</html>", "header{display:none!important}")
+	if !strings.Contains(out, "data-local-inject") || !strings.Contains(out, "</html>") {
+		t.Errorf("退到 </html> 前失败：%s", out)
+	}
+	// 两者都没有时直接追加
+	out = injectHide("裸片段", "header{display:none!important}")
+	if !strings.HasSuffix(out, "</script>") {
+		t.Errorf("无 </body>/</html> 时应追加到末尾：%s", out)
+	}
+	// 空的 hideCSS 不应改动页面
+	raw := "<html><body>x</body></html>"
+	if got := injectHide(raw, "   "); got != raw {
+		t.Errorf("空 hideCSS 不应注入任何东西：%q", got)
+	}
+}
+
+func TestHideScriptIsSafeAndSelectorsAreJSONEncoded(t *testing.T) {
+	script := hideScript(hideSelectors(hideCSS1))
+	if !strings.Contains(script, `document.querySelectorAll`) {
+		t.Error("脚本应使用 querySelectorAll 兜底")
+	}
+	if !strings.Contains(script, `'important'`) {
+		t.Error("脚本必须用行内 !important（行内 important 优先级最高）")
+	}
+	// 选择器里的双引号必须被 JSON 转义，否则脚本会语法错误
+	if strings.Contains(script, `[data-sidebar="sidebar"]`) {
+		t.Error("选择器里的双引号未转义，生成的脚本会坏")
+	}
+	// 含尖括号的输入要转义，避免提前结束 <script>
+	if s := hideScript(`a<script>`); strings.Contains(s, `<script>`) {
+		t.Error("脚本内容未转义尖括号")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 引擎注册表
 // ---------------------------------------------------------------------------
 

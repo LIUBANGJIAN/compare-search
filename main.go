@@ -46,8 +46,19 @@ var panelHTMLRaw string
 //go:embed web/panel.js
 var panelJSRaw string
 
-// version 由构建时注入：-ldflags "-X main.version=<tag>"，默认 dev。
-var version = "dev"
+//go:embed VERSION
+var versionRaw string
+
+// version 是给外部看/上报的版本号。
+// 优先用构建时注入的（-ldflags "-X main.version=<tag>"），否则用仓库里的 VERSION 文件，
+// 这样本地直接 `go build` 也能报出正确版本，不会退化成 dev。
+var version = ""
+
+func init() {
+	if strings.TrimSpace(version) == "" {
+		version = strings.TrimSpace(versionRaw)
+	}
+}
 
 const (
 	// 默认上游地址用 RFC 5737 文档专用地址（192.0.2.0/24），只作占位。
@@ -749,8 +760,67 @@ func newRewriter(target *url.URL) *rewriter {
 	}
 }
 
+// injectHide 把「隐藏网站外壳」的样式与脚本插到文档**末尾**。
+//
+// 为什么不像以前那样插在 </head> 前：
+//   - 同优先级、同为 !important 时，**后出现的规则胜出**。站点自己的 CSS 往往
+//     在 head 里、甚至带 !important，插在 head 前会被压掉（实测用户遇到的就是这个）。
+//   - 有些上游没有 </head>，插在最前面还会把 <!DOCTYPE> 挤到后面，让页面进怪异模式。
+//
+// 另外再补一段脚本，用**行内 !important** 兜底 —— 行内样式的 !important 优先级最高，
+// 站点用任何选择器都压不过它。SPA 后渲染出来的节点也会被 MutationObserver 补上。
+func injectHide(page, hideCSS string) string {
+	if strings.TrimSpace(hideCSS) == "" {
+		return page
+	}
+	block := "<style data-local-inject>" + hideCSS + "</style>" +
+		"<script data-local-inject>" + hideScript(hideSelectors(hideCSS)) + "</script>"
+
+	if i := strings.LastIndex(page, "</body>"); i >= 0 {
+		return page[:i] + block + page[i:]
+	}
+	if i := strings.LastIndex(page, "</html>"); i >= 0 {
+		return page[:i] + block + page[i:]
+	}
+	return page + block
+}
+
+// hideSelectors 从 CSS 文本里粗略取出选择器列表（每条规则取 { 之前的部分）。
+// 目的是喂给 querySelectorAll，取不准也不会出错（调用方有 try/catch）。
+func hideSelectors(hideCSS string) string {
+	var parts []string
+	for _, rule := range strings.Split(hideCSS, "}") {
+		head := rule
+		if i := strings.Index(head, "{"); i >= 0 {
+			head = head[:i]
+		}
+		if head = strings.TrimSpace(head); head != "" {
+			parts = append(parts, head)
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// hideScript 生成一段自执行脚本：把选择器命中的元素用行内 !important 隐藏，
+// 并在 DOM 变化时补刀（应对前端框架后渲染出来的外壳）。
+func hideScript(selectorList string) string {
+	raw, err := json.Marshal(selectorList)
+	if err != nil {
+		raw = []byte(`""`)
+	}
+	return "(function(){try{var S=" + string(raw) + ",t=null;" +
+		"function a(){var n=document.querySelectorAll(S),i;" +
+		"for(i=0;i<n.length;i++){if(n[i].style.getPropertyValue('display')!=='none')" +
+		"{n[i].style.setProperty('display','none','important');}}}" +
+		"a();" +
+		"if(window.MutationObserver&&document.documentElement){" +
+		"new MutationObserver(function(){if(t){return;}t=setTimeout(function(){t=null;a();},200);})" +
+		".observe(document.documentElement,{childList:true,subtree:true});}" +
+		"}catch(e){}})();"
+}
+
 // makeProxy 创建反向代理：剥掉禁止 iframe 内嵌的安全头；
-// 对 HTML/JS/CSS 响应做正文改写（绝对地址转相对），并向 HTML 注入隐藏站点外壳的 CSS；
+// 对 HTML/JS/CSS 响应做正文改写（绝对地址转相对），并向 HTML 注入隐藏站点外壳的样式；
 // jar 非 nil 时自动携带/记录该源的登录 Cookie。
 func makeProxy(target *url.URL, hideCSS string, jar *cookieJar) *httputil.ReverseProxy {
 	origin := target.Scheme + "://" + target.Host
@@ -829,12 +899,7 @@ func makeProxy(target *url.URL, hideCSS string, jar *cookieJar) *httputil.Revers
 			s = strings.ReplaceAll(s, rw.jsEsc, "")
 			s = strings.ReplaceAll(s, rw.origin, "")
 			if inject {
-				style := "<style data-local-inject>" + hideCSS + "</style>"
-				if i := strings.Index(s, "</head>"); i >= 0 {
-					s = s[:i] + style + s[i:]
-				} else {
-					s = style + s
-				}
+				s = injectHide(s, hideCSS)
 			}
 			h.Del("Content-Length")
 			h.Del("Content-Range")

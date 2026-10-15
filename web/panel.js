@@ -125,9 +125,10 @@
             settingsBtn: d.getElementById('settingsBtn'),
             prevBtn: d.getElementById('prevBtn'),
             nextBtn: d.getElementById('nextBtn'),
+            miniPrev: d.getElementById('miniPrev'),
+            miniNext: d.getElementById('miniNext'),
             pager: d.getElementById('pager'),
             pagerInfo: d.getElementById('pagerInfo'),
-            pagerKw: d.getElementById('pagerKw'),
             clearBtn: d.getElementById('clearBtn'),
             listBox: d.getElementById('listBox'),
             codesCount: d.getElementById('codesCount'),
@@ -379,21 +380,26 @@
             }
         }
 
-        // ---------------- 翻页器 ----------------
+        // ---------------- 翻页器（就在番号栏里，收起时挪到右侧竖条） ----------------
         function renderPager() {
             var total = state.items.length;
             els.codesCount.textContent = String(total);
+
+            var atStart = state.index <= 0;
+            var atEnd = total === 0 || state.index >= total - 1;
+
             if (total === 0) {
                 els.pager.hidden = true;
                 els.pagerInfo.textContent = '0 / 0';
-                els.pagerKw.textContent = '';
-                return;
+            } else {
+                els.pager.hidden = false;
+                els.pagerInfo.textContent = (state.index < 0 ? 0 : state.index + 1) + ' / ' + total;
             }
-            els.pager.hidden = false;
-            els.pagerInfo.textContent = (state.index < 0 ? 0 : state.index + 1) + ' / ' + total;
-            els.pagerKw.textContent = state.index < 0 ? '（点右侧番号开始）' : state.items[state.index];
-            els.prevBtn.disabled = state.index <= 0;
-            els.nextBtn.disabled = state.index >= total - 1;
+            els.prevBtn.disabled = atStart;
+            els.nextBtn.disabled = atEnd;
+            // 迷你按钮与主按钮状态保持一致
+            els.miniPrev.disabled = atStart;
+            els.miniNext.disabled = atEnd;
         }
 
         // ---------------- 检索 ----------------
@@ -460,6 +466,8 @@
 
         els.prevBtn.addEventListener('click', function () { step(-1); });
         els.nextBtn.addEventListener('click', function () { step(1); });
+        els.miniPrev.addEventListener('click', function () { step(-1); });
+        els.miniNext.addEventListener('click', function () { step(1); });
 
         d.addEventListener('keydown', function (e) {
             if (!e.altKey || state.items.length === 0) return;

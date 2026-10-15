@@ -122,8 +122,17 @@ jobs:
             exit 1
           fi
 
-      - name: 计算版本号
-        run: echo "VERSION=sha-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_ENV"
+      # 版本号只认仓库里的 VERSION 文件（每次改代码都要往上抬一位）。
+      # sha 另外作为标签带上，方便定位到具体提交。
+      - name: 读取版本号
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error title=VERSION 格式非法::VERSION=${VERSION}（应为 x.y.z）"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "SHA_TAG=sha-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_ENV"
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -164,6 +173,7 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ env.VERSION }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=ref,event=branch
@@ -188,20 +198,26 @@ jobs:
       - name: 核验镜像已落地
         if: needs.gate.outputs.publish == 'true'
         run: |
-          tag="sha-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
-          url="https://hub.docker.com/v2/repositories/${IMAGE}/tags/${tag}"
-          for _ in $(seq 1 6); do
-            if curl -fsS --max-time 10 "$url" -o "$RUNNER_TEMP/tag.json"; then
-              archs="$(grep -o '"architecture":"[^"]*"' "$RUNNER_TEMP/tag.json" | sort -u | tr '\n' ' ')"
-              echo "::notice title=镜像已落地::${IMAGE}:${tag} 架构=${archs}"
-              case "$archs" in *amd64*) ;; *) echo "::error title=架构缺失::${IMAGE}:${tag} 未见 amd64"; exit 1 ;; esac
-              case "$archs" in *arm64*) ;; *) echo "::error title=架构缺失::${IMAGE}:${tag} 未见 arm64"; exit 1 ;; esac
-              exit 0
+          # 版本号标签与 sha 标签都要在 registry 上查得到
+          for tag in "$VERSION" "sha-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"; do
+            url="https://hub.docker.com/v2/repositories/${IMAGE}/tags/${tag}"
+            ok=""
+            for _ in $(seq 1 6); do
+              if curl -fsS --max-time 10 "$url" -o "$RUNNER_TEMP/tag.json"; then
+                archs="$(grep -o '"architecture":"[^"]*"' "$RUNNER_TEMP/tag.json" | sort -u | tr '\n' ' ')"
+                echo "::notice title=镜像已落地::${IMAGE}:${tag} 架构=${archs}"
+                case "$archs" in *amd64*) ;; *) echo "::error title=架构缺失::${IMAGE}:${tag} 未见 amd64"; exit 1 ;; esac
+                case "$archs" in *arm64*) ;; *) echo "::error title=架构缺失::${IMAGE}:${tag} 未见 arm64"; exit 1 ;; esac
+                ok=1
+                break
+              fi
+              sleep 5
+            done
+            if [ -z "$ok" ]; then
+              echo "::error title=镜像核验失败::多次请求未成功，请确认 Docker Hub 仓库为公开：#url=${url}"
+              exit 1
             fi
-            sleep 5
           done
-          echo "::error title=镜像核验失败::多次请求未成功，请确认 Docker Hub 仓库为公开：#url=${url}"
-          exit 1
 
       - name: 失败时输出构建参数（诊断）
         if: failure()

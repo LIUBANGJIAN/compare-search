@@ -224,8 +224,9 @@ note "面板页"
 curl -s --max-time 5 "$PANEL/" >"$WORKDIR/page.html"
 PAGE="$(cat "$WORKDIR/page.html")"
 
-for id in kwInput searchBtn settingsBtn pager pagerInfo pagerKw prevBtn nextBtn \
-    clearBtn listBox codesToggle splitter settingsDialog directLink engineList addEngineBtn resultsCol; do
+for id in kwInput searchBtn settingsBtn pager pagerInfo prevBtn nextBtn \
+    miniPrev miniNext clearBtn listBox codesToggle splitter settingsDialog \
+    directLink engineList addEngineBtn resultsCol; do
     case "$PAGE" in
         *"id=\"$id\""*) pass "面板页含 #$id" ;;
         *) fail "面板页缺少 #$id" ;;
@@ -326,6 +327,39 @@ check_engine_proxy() {
 
 check_engine_proxy "引擎1 代理" "$E1_PORT" "/files" "MOCK-UPSTREAM-$SRC1_PORT"
 check_engine_proxy "引擎2 代理" "$E2_PORT" "/s" "MOCK-UPSTREAM-$SRC2_PORT"
+
+# ---------------------------------------------------------------------------
+# 隐藏站点外壳：光有标记不算数，要看注入的到底是不是真规则、有没有兜底
+# ---------------------------------------------------------------------------
+note "隐藏站点外壳"
+HIDE1="$(curl -s --max-time 5 "http://127.0.0.1:${E1_PORT}/files?q=abc")"
+case "$HIDE1" in
+    *'<style data-local-inject>'*'display:none!important'*)
+        pass "注入了真实的隐藏规则（不是空壳样式）" ;;
+    *) fail "注入的隐藏规则内容不对" ;;
+esac
+case "$HIDE1" in
+    *'[data-sidebar'*)
+        pass "注入的是该引擎自己的 hideCSS" ;;
+    *) fail "注入的 hideCSS 不是该引擎配置的那份" ;;
+esac
+case "$HIDE1" in
+    *'<script data-local-inject>'*'important'*)
+        pass "带行内 !important 兜底脚本（压得住站点自己的 !important）" ;;
+    *) fail "缺少行内 !important 兜底脚本" ;;
+esac
+# 注入块必须落在 </body> 之前：源序靠后才能在同样 !important 时胜出
+if printf '%s' "$HIDE1" | "$PY" -c "
+import sys
+h = sys.stdin.read()
+i = h.find('data-local-inject')
+j = h.find('</body>')
+sys.exit(0 if (i >= 0 and j >= 0 and i < j) else 1)
+"; then
+    pass "注入块位于文档末尾（</body> 之前），源序靠后"
+else
+    fail "注入块不在 </body> 之前，站点自己的 !important 会压掉它"
+fi
 
 # ---------------------------------------------------------------------------
 # 这个网站「带关键字直接检索」—— 对接方只需要这一个 URL

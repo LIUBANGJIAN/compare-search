@@ -72,26 +72,25 @@
         .btn-primary:hover { background: #0055aa; border-color: #0055aa; color: #fff; }
         .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
 
-        /* ---------- 翻页器 ---------- */
-        .pager {
+        /* ---------- 翻页控件（放在番号栏里，省出上方空间） ---------- */
+        .codes-pager {
             display: flex;
-            flex-wrap: wrap;
             align-items: center;
+            justify-content: center;
             gap: 8px;
-            margin-bottom: 10px;
-            padding: 6px 10px;
-            font-size: 0.82rem;
-            color: #334155;
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            border-radius: 8px;
+            padding: 5px 8px;
+            background: #fcfdfe;
+            border-bottom: 1px solid #e2e8f0;
             flex: 0 0 auto;
         }
-        .pager[hidden] { display: none; }
-        .pager button {
-            padding: 4px 11px;
+        .codes-pager[hidden] { display: none; }
+        .codes-pager button {
+            width: 30px;
+            height: 24px;
+            padding: 0;
             font: inherit;
-            font-size: 0.8rem;
+            font-size: 1rem;
+            line-height: 1;
             color: #334155;
             background: #fff;
             border: 1px solid #cbd5e1;
@@ -99,11 +98,14 @@
             cursor: pointer;
             transition: all 0.2s ease;
         }
-        .pager button:hover:not(:disabled) { color: #0066cc; border-color: #0066cc; background: #ebf5ff; }
-        .pager button:disabled { opacity: 0.45; cursor: not-allowed; }
-        .pager-info { font-variant-numeric: tabular-nums; color: #64748b; }
-        .pager-kw { color: #64748b; word-break: break-all; }
-        .pager-kw b { color: #0f172a; }
+        .codes-pager button:hover:not(:disabled) { color: #0066cc; border-color: #0066cc; background: #ebf5ff; }
+        .codes-pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+        .codes-pager .pager-info {
+            font-size: 0.78rem;
+            font-variant-numeric: tabular-nums;
+            color: #64748b;
+            white-space: nowrap;
+        }
 
         /* ---------- 主体三栏 ---------- */
         .layout {
@@ -273,12 +275,20 @@
         .data-line.clicked { color: #dc2626; border-color: #fca5a5; background: #fef2f2; }
         .data-line.clicked.current { color: #b91c1c; background: #fee2e2; border-left-color: #dc2626; }
 
-        .codes-toggle {
+        /* 右侧竖条：收起/展开 + 收起状态下的迷你翻页 */
+        .codes-rail {
             flex: 0 0 26px;
+            align-self: stretch;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            margin-left: 4px;
+        }
+        .codes-toggle {
+            flex: 1 1 auto;
             display: flex;
             align-items: center;
             justify-content: center;
-            margin-left: 4px;
             padding: 0;
             font: inherit;
             font-size: 0.75rem;
@@ -292,6 +302,24 @@
             transition: all 0.2s ease;
         }
         .codes-toggle:hover { color: #0066cc; border-color: #0066cc; background: #ebf5ff; }
+        .mini-nav {
+            display: none;
+            flex: 0 0 26px;
+            padding: 0;
+            font: inherit;
+            font-size: 1rem;
+            line-height: 1;
+            color: #334155;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .mini-nav:hover:not(:disabled) { color: #0066cc; border-color: #0066cc; background: #ebf5ff; }
+        .mini-nav:disabled { opacity: 0.4; cursor: not-allowed; }
+        /* 番号栏收起后，翻页按钮挪到右侧竖条里，仍然能翻 */
+        .layout.codes-collapsed .mini-nav { display: block; }
         .layout.codes-collapsed .codes-col { flex-basis: 0; border-width: 0; }
         .layout.codes-collapsed .splitter { display: none; }
 
@@ -433,13 +461,6 @@
             <button id="settingsBtn" class="btn" type="button">设置</button>
         </div>
 
-        <div class="pager" id="pager" hidden>
-            <button id="prevBtn" type="button">← 上一个</button>
-            <span class="pager-info" id="pagerInfo">0 / 0</span>
-            <button id="nextBtn" type="button">下一个 →</button>
-            <span class="pager-kw">当前：<b id="pagerKw"></b></span>
-        </div>
-
         <div class="layout" id="layout">
             <div class="results-col" id="resultsCol"></div>
 
@@ -450,10 +471,19 @@
                     <span>番号 <span class="count" id="codesCount">0</span></span>
                     <span><button class="clear-btn" id="clearBtn" type="button">清空</button></span>
                 </div>
+                <div class="codes-pager" id="pager" hidden>
+                    <button id="prevBtn" type="button" title="上一个（Alt+←）">‹</button>
+                    <span class="pager-info" id="pagerInfo">0 / 0</span>
+                    <button id="nextBtn" type="button" title="下一个（Alt+→）">›</button>
+                </div>
                 <div class="list-box" id="listBox"></div>
             </div>
 
-            <button class="codes-toggle" id="codesToggle" type="button" title="收起 / 展开番号栏">收起</button>
+            <div class="codes-rail">
+                <button class="codes-toggle" id="codesToggle" type="button" title="收起 / 展开番号栏">收起</button>
+                <button class="mini-nav" id="miniPrev" type="button" title="上一个">‹</button>
+                <button class="mini-nav" id="miniNext" type="button" title="下一个">›</button>
+            </div>
         </div>
     </div>
 

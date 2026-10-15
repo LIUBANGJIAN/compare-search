@@ -294,7 +294,7 @@ const ENGINES_BOOT = [
 ];
 const BOOT_ITEMS = ['ABP-123', 'SSIS-001', 'IPX-777'];
 const ALL_IDS = ['resultsCol', 'kwInput', 'searchBtn', 'settingsBtn', 'prevBtn', 'nextBtn',
-    'pager', 'pagerInfo', 'pagerKw', 'clearBtn', 'listBox', 'codesCount',
+    'pager', 'pagerInfo', 'clearBtn', 'listBox', 'codesCount', 'miniPrev', 'miniNext',
     'codesToggle', 'layout', 'splitter', 'settingsDialog', 'directLink', 'engineList',
     'addEngineBtn', 'settingsHint', 'settingsSave', 'settingsCancel', 'bootstrap'];
 
@@ -487,6 +487,28 @@ ok('番号栏宽度与收起状态仍可用（列表自身滚动由 CSS 保证�
     eq(byId.layout.classList.contains('codes-collapsed'), true);
     byId.codesToggle.fire('click');
     eq(byId.layout.classList.contains('codes-collapsed'), false);
+});
+
+ok('番号栏带自己的翻页控件，收起后还有迷你翻页可用', () => {
+    const before = byId.pagerInfo.textContent;   // 50 / 50
+    byId.codesToggle.fire('click');              // 收起
+    eq(byId.layout.classList.contains('codes-collapsed'), true);
+    byId.miniPrev.fire('click');
+    truthy(byId.pagerInfo.textContent !== before, '收起后迷你「上一个」应能翻页');
+    byId.miniNext.fire('click');
+    eq(byId.pagerInfo.textContent, before, '迷你「下一个」应能翻回来');
+    byId.codesToggle.fire('click');              // 展开
+    eq(byId.layout.classList.contains('codes-collapsed'), false);
+});
+
+ok('迷你翻页按钮与主按钮的禁用状态保持一致', () => {
+    // 回到只有 50 条的列表：上一条不可用
+    byId.listBox.querySelectorAll('.data-line')[0].fire('click');
+    eq(byId.prevBtn.disabled, true);
+    eq(byId.miniPrev.disabled, true);
+    eq(byId.miniNext.disabled, false);
+    byId.nextBtn.fire('click');
+    eq(byId.miniPrev.disabled, false);
 });
 
 ok('清空会复位列表与所有引擎的 iframe', () => {
