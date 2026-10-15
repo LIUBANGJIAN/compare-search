@@ -12,7 +12,7 @@
 set -uo pipefail
 
 ENGINE="${ENGINE:-docker}"
-IMAGE="${IMAGE:-txt2html:smoke}"
+IMAGE="${IMAGE:-compare-search:smoke}"
 BIN="${BIN:-./txt2html}"
 if [ "$ENGINE" = "local" ]; then
     : "${UPSTREAM_HOST:=127.0.0.1}"

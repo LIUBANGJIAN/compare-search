@@ -3,10 +3,10 @@
 # 非 root 进程（uid 10001）可以直接写，不需要手工 chown。
 
 services:
-  txt2html:
-    # 改成你自己的镜像：<dockerhub用户名>/txt2html:latest
-    image: ${IMAGE:-namespace-unset/txt2html}:${TAG:-latest}
-    container_name: txt2html
+  compare-search:
+    # 镜像名与 GitHub Actions 里推送到 Docker Hub 的名称一致
+    image: ${IMAGE:-namespace-unset/compare-search}:${TAG:-latest}
+    container_name: compare-search
     restart: unless-stopped
 
     ports:
@@ -23,7 +23,7 @@ services:
       # 若要改端口，记得 ports 与 PAGE_PORT/PROXY1_PORT 一起改。
 
     volumes:
-      - txt2html-data:/data
+      - compare-search-data:/data
 
     healthcheck:
       # 与 Dockerfile 里那条保持一致
@@ -56,4 +56,4 @@ services:
     #   - /tmp
 
 volumes:
-  txt2html-data:
+  compare-search-data:

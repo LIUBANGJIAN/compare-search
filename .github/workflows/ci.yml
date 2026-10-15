@@ -101,7 +101,7 @@ jobs:
       # 这样「无条件校验形态」才成立，不必给「无凭据」开免检口子。
       # （workflow 级 env 取不到 secrets 上下文；Docker Hub 命名空间强制全小写，
       #   而 GitHub 用户名与 Docker Hub 用户名并不是同一个东西。）
-      IMAGE: ${{ secrets.DOCKERHUB_USERNAME || 'namespace-unset' }}/txt2html
+      IMAGE: ${{ secrets.DOCKERHUB_USERNAME || 'namespace-unset' }}/compare-search
     steps:
       - uses: actions/checkout@v4
 
@@ -110,7 +110,7 @@ jobs:
           printf 'IMAGE=%s\n' "$IMAGE"
           printf 'publish=%s\n' '${{ needs.gate.outputs.publish }}'
           if ! printf '%s' "$IMAGE" | grep -Eq '^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$'; then
-            echo "::error title=镜像名非法::IMAGE=$IMAGE（Docker Hub 命名空间必须全小写，形如 liubangjian/txt2html）"
+            echo "::error title=镜像名非法::IMAGE=$IMAGE（Docker Hub 命名空间必须全小写，形如 liubangjian/compare-search）"
             exit 1
           fi
           # 与取值位置无关的禁令：即便三处取值「一致地错」，这条也会报红。
@@ -136,7 +136,7 @@ jobs:
           context: .
           platforms: linux/amd64
           load: true
-          tags: txt2html:smoke
+          tags: compare-search:smoke
           build-args: |
             VERSION=${{ env.VERSION }}
           cache-from: type=gha
@@ -145,7 +145,7 @@ jobs:
       - name: 冒烟 · 真跑镜像
         env:
           ENGINE: docker
-          IMAGE: txt2html:smoke
+          IMAGE: compare-search:smoke
           EXPECT_VERSION: ${{ env.VERSION }}
         run: bash scripts/smoke.sh
 
