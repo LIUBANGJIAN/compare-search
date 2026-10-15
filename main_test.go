@@ -281,6 +281,54 @@ func TestWriteFileAtomicLeavesNoTempFiles(t *testing.T) {
 	}
 }
 
+func TestHidePresets(t *testing.T) {
+	list := hidePresets()
+	if len(list) < 3 {
+		t.Fatalf("预设太少，用户还是得自己写选择器（实际 %d 个）", len(list))
+	}
+	for _, p := range list {
+		if p.Key == "" || p.Label == "" {
+			t.Errorf("预设缺少 key 或 label：%+v", p)
+		}
+	}
+	// 「通用」必须存在且有内容 —— 它是新建引擎的默认值
+	var common string
+	for _, p := range list {
+		if p.Key == "common" {
+			common = p.CSS
+		}
+	}
+	if strings.TrimSpace(common) == "" {
+		t.Error("通用预设不能为空")
+	}
+	if commonHideCSS() != common {
+		t.Errorf("commonHideCSS() 与通用预设不一致：%q vs %q", commonHideCSS(), common)
+	}
+	// 预设里的 CSS 必须真的包含 display:none，否则等于没隐藏
+	for _, p := range list {
+		if p.CSS == "" {
+			continue
+		}
+		if !strings.Contains(p.CSS, "display:none") {
+			t.Errorf("预设 %q 的 CSS 不像隐藏规则：%q", p.Label, p.CSS)
+		}
+	}
+}
+
+func TestBuildPageCarriesHidePresets(t *testing.T) {
+	page := buildPage(pageData{
+		Items:       []string{"A"},
+		Engines:     []enginePayload{{Name: "X", Base: "http://a", Path: "/s", ProxyPort: 1}},
+		HidePresets: hidePresets(),
+	})
+	if !strings.Contains(page, `"hidePresets"`) {
+		t.Error("引导数据里应带上隐藏外壳的预设")
+	}
+	if !strings.Contains(page, `"key":"common"`) {
+		t.Error("引导数据里应包含通用预设")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 引擎注册表
 // ---------------------------------------------------------------------------

@@ -281,6 +281,13 @@ function makeEl(id, tag) {
     return el;
 }
 
+const HIDE_PRESETS = [
+    { key: 'none', label: '不隐藏', css: '' },
+    { key: 'common', label: '通用（顶栏 / 侧边栏 / 页脚）', css: 'header,aside,footer{display:none!important}' },
+    { key: '115', label: '115 Lite Web', css: 'header,aside,footer,[data-sidebar="sidebar"]{display:none!important}' },
+    { key: 'search', label: '资源搜索', css: 'header.topbar,#filter-bar{display:none!important}' }
+];
+
 const ENGINES_BOOT = [
     { name: '115 Lite Web', base: 'http://192.0.2.20:11510', path: '/files', proxyPort: 18898 },
     { name: '资源搜索', base: 'http://192.0.2.20:8787', path: '/s', proxyPort: 18897 }
@@ -301,7 +308,7 @@ function buildDoc(boot, ids) {
 const byId = {};
 ALL_IDS.forEach((id) => { byId[id] = makeEl(id, id === 'kwInput' ? 'textarea' : 'div'); });
 buildDoc({
-    items: BOOT_ITEMS, engines: ENGINES_BOOT, origin: '内置默认值',
+    items: BOOT_ITEMS, engines: ENGINES_BOOT, hidePresets: HIDE_PRESETS, origin: '内置默认值',
     version: 'test', q: '', maxEngines: 8
 }, byId);
 
@@ -508,24 +515,55 @@ ok('清空会复位列表与所有引擎的 iframe', () => {
         eq(byId.directLink.textContent, 'http://127.0.0.1:18899/?q=关键字');
     });
 
-    await okAsync('点「新增搜索引擎」多出一行', async () => {
+    await okAsync('「隐藏网站外壳」提供现成预设，点一下就填进去（不用自己写选择器）', async () => {
+        const row = byId.engineList.findAll('engine-row')[0];
+        const labels = row.findAll('preset-btn').map((b) => b.textContent);
+        eq(labels, ['不隐藏', '通用（顶栏 / 侧边栏 / 页脚）', '115 Lite Web', '资源搜索']);
+        const css = row.findAll('css-input')[0];
+        eq(css.value, '', '初始为空表示不隐藏');
+    });
+
+    await okAsync('点「通用」预设会把对应 CSS 填进输入框', async () => {
+        const row = byId.engineList.findAll('engine-row')[0];
+        const btns = row.findAll('preset-btn');
+        const css = row.findAll('css-input')[0];
+        btns[1].fire('click');
+        eq(css.value, HIDE_PRESETS[1].css);
+        btns[2].fire('click');
+        eq(css.value, HIDE_PRESETS[2].css);
+        btns[0].fire('click');
+        eq(css.value, '');
+    });
+
+    await okAsync('新建的引擎默认带「通用」预设，不用面对空白框', async () => {
         byId.addEngineBtn.fire('click');
-        eq(byId.engineList.findAll('engine-row').length, 3);
+        const rows = byId.engineList.findAll('engine-row');
+        eq(rows.length, 3);
+        const css = rows[2].findAll('css-input')[0];
+        eq(css.value, HIDE_PRESETS[1].css, '新建引擎应默认带上通用预设');
+    });
+
+    await okAsync('点「新增搜索引擎」多出一行（上一用例已新增一次，这里再点一次）', async () => {
+        const before = byId.engineList.findAll('engine-row').length;
+        byId.addEngineBtn.fire('click');
+        eq(byId.engineList.findAll('engine-row').length, before + 1);
     });
 
     await okAsync('「删除」会移除对应那一行', async () => {
         const rows = byId.engineList.findAll('engine-row');
+        const before = rows.length;
         rows[1].findAll('del-btn')[0].fire('click');
-        eq(byId.engineList.findAll('engine-row').length, 2);
+        eq(byId.engineList.findAll('engine-row').length, before - 1);
     });
 
     await okAsync('保存时把当前编辑内容 POST 给 /api/config', async () => {
         fetched.length = 0;
+        const expectCount = byId.engineList.findAll('engine-row').length;
         byId.settingsSave.fire('click');
         eq(fetched.length, 1);
         eq(fetched[0].url, '/api/config');
         const body = JSON.parse(fetched[0].opts.body);
-        eq(body.engines.length, 2);
+        eq(body.engines.length, expectCount);
         eq(body.engines[0].name, '115 Lite Web');
         eq(body.engines[0].base, 'http://192.0.2.20:11510');
         eq(body.engines[0].path, '/files');
@@ -571,7 +609,8 @@ ok('清空会复位列表与所有引擎的 iframe', () => {
         const freshIds = {};
         ALL_IDS.forEach((id) => { freshIds[id] = makeEl(id); });
         buildDoc({
-            items: [], engines: ENGINES_BOOT, origin: '配置文件（页面保存）',
+            items: [], engines: ENGINES_BOOT, hidePresets: HIDE_PRESETS,
+            origin: '配置文件（页面保存）',
             version: 'test', q: 'ABP-999', maxEngines: 8
         }, freshIds);
 

@@ -61,7 +61,37 @@ const (
 	// 内置两个引擎的「隐藏站点外壳」CSS，可按需增删选择器
 	hideCSS1 = `header,aside,footer{display:none!important}[data-sidebar="sidebar"],[data-slot="sidebar"],[data-slot="sidebar-gap"],[data-sidebar="footer"],[data-slot="sidebar-footer"]{display:none!important}` // 115 Lite Web：隐藏顶栏、侧边栏、底部统计条
 	hideCSS2 = "header.topbar,#filter-form,.stats,#batchbar{display:none!important}"                                                                                                                              // 资源搜索：隐藏顶栏、筛选条、统计行、批量操作栏
+
+	// 通用预设：多数站点的顶栏/侧边栏/页脚都是这几个标签或 role，先试它最省事
+	hideCSSCommon = `header,aside,footer,nav,[role="banner"],[role="navigation"],[role="complementary"]{display:none!important}`
 )
+
+// hidePreset 是给「隐藏站点外壳」用的现成方案。
+// 用户不用懂 CSS 选择器，点一下就能填；想更精确再自己改。
+type hidePreset struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	CSS   string `json:"css"`
+}
+
+func hidePresets() []hidePreset {
+	return []hidePreset{
+		{Key: "none", Label: "不隐藏", CSS: ""},
+		{Key: "common", Label: "通用（顶栏 / 侧边栏 / 页脚）", CSS: hideCSSCommon},
+		{Key: "115", Label: "115 Lite Web", CSS: hideCSS1},
+		{Key: "search", Label: "资源搜索", CSS: hideCSS2},
+	}
+}
+
+// commonHideCSS 返回通用预设的 CSS —— 新建引擎时默认用它，省得用户面对空白框。
+func commonHideCSS() string {
+	for _, p := range hidePresets() {
+		if p.Key == "common" {
+			return p.CSS
+		}
+	}
+	return ""
+}
 
 // deployment 是只能通过部署参数指定的部分（页面上改不了）。
 type deployment struct {
@@ -368,12 +398,13 @@ func readList(path string) ([]string, error) {
 
 // pageData 是注入面板页的引导数据：番号列表、引擎列表（含各自代理端口）都从这里下发。
 type pageData struct {
-	Items      []string        `json:"items"`
-	Engines    []enginePayload `json:"engines"`
-	Origin     string          `json:"origin"`
-	Version    string          `json:"version"`
-	Query      string          `json:"q"`
-	MaxEngines int             `json:"maxEngines"`
+	Items       []string        `json:"items"`
+	Engines     []enginePayload `json:"engines"`
+	HidePresets []hidePreset    `json:"hidePresets"`
+	Origin      string          `json:"origin"`
+	Version     string          `json:"version"`
+	Query       string          `json:"q"`
+	MaxEngines  int             `json:"maxEngines"`
 }
 
 // startServers 启动：
@@ -459,12 +490,13 @@ func startServers(dep deployment, store *settingsStore, items []string) (string,
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = io.WriteString(w, buildPage(pageData{
-			Items:      items,
-			Engines:    payload,
-			Origin:     string(orig),
-			Version:    version,
-			Query:      keyword,
-			MaxEngines: maxEngines,
+			Items:       items,
+			Engines:     payload,
+			HidePresets: hidePresets(),
+			Origin:      string(orig),
+			Version:     version,
+			Query:       keyword,
+			MaxEngines:  maxEngines,
 		}))
 	})
 	go func() { _ = http.Serve(ln, mux) }()

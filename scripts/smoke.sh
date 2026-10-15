@@ -248,6 +248,15 @@ case "$PAGE" in
     *'"proxyPort"'*) pass "面板页下发了各引擎的代理端口" ;;
     *) fail "面板页未下发引擎代理端口" ;;
 esac
+# 「隐藏网站外壳」要给现成预设，用户不该被迫自己写 CSS 选择器
+case "$PAGE" in
+    *'"hidePresets"'*) pass "面板页下发了隐藏外壳的预设" ;;
+    *) fail "面板页未下发隐藏外壳预设" ;;
+esac
+case "$PAGE" in
+    *'"key":"common"'*) pass "预设立即包含「通用」方案" ;;
+    *) fail "预设里缺少通用方案" ;;
+esac
 if [ -n "$E1_NAME" ]; then
     case "$PAGE" in
         *"$E1_NAME"*) pass "结果面板标题使用引擎名（$E1_NAME）" ;;

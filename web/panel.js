@@ -148,7 +148,7 @@
 
         // ---------------- 引导数据 ----------------
         var boot = {
-            items: [], engines: [], origin: '', version: '', q: '', maxEngines: 8
+            items: [], engines: [], hidePresets: [], origin: '', version: '', q: '', maxEngines: 8
         };
         var bootEl = d.getElementById('bootstrap');
         if (bootEl && bootEl.textContent) {
@@ -157,6 +157,7 @@
                 if (parsed && typeof parsed === 'object') {
                     if (Array.isArray(parsed.items)) boot.items = parsed.items;
                     if (Array.isArray(parsed.engines)) boot.engines = parsed.engines;
+                    if (Array.isArray(parsed.hidePresets)) boot.hidePresets = parsed.hidePresets;
                     if (typeof parsed.origin === 'string') boot.origin = parsed.origin;
                     if (typeof parsed.version === 'string') boot.version = parsed.version;
                     if (typeof parsed.q === 'string') boot.q = parsed.q;
@@ -176,6 +177,7 @@
             index: -1,
             viewed: Object.create(null),
             engines: boot.engines.slice(),
+            hidePresets: boot.hidePresets.slice(),
             origin: boot.origin,
             maxEngines: boot.maxEngines || 8
         };
@@ -564,6 +566,15 @@
             return { wrap: wrap, input: input };
         }
 
+        // 取某个预设的 CSS；取不到就返回空串
+        function presetCSS(key) {
+            var list = state.hidePresets || [];
+            for (var i = 0; i < list.length; i++) {
+                if (list[i].key === key) return list[i].css || '';
+            }
+            return '';
+        }
+
         function renderEditor(rows) {
             els.engineList.textContent = '';
             editorRows = [];
@@ -604,14 +615,43 @@
 
                 var details = d.createElement('details');
                 var summary = d.createElement('summary');
-                summary.textContent = '高级：隐藏该站点自身的外壳（CSS 选择器）';
+                summary.textContent = '高级：隐藏该网站自身的外壳（可选）';
+
+                var help = d.createElement('p');
+                help.classList.add('field-help');
+                help.textContent = '被嵌进来的网站自己的顶栏 / 侧边栏 / 页脚会占地方。'
+                    + '直接点下面的预设最省事；想更精确，就在浏览器里右键要隐藏的那块 → 检查 → '
+                    + '右键该元素 → 复制 → 复制选择器，粘贴到下面的输入框。';
+
+                var presets = d.createElement('div');
+                presets.classList.add('css-presets');
+                var plabel = d.createElement('span');
+                plabel.classList.add('preset-label');
+                plabel.textContent = '常用预设：';
+                presets.appendChild(plabel);
+
                 var cssLabel = d.createElement('label');
-                cssLabel.textContent = '留空表示不隐藏';
+                cssLabel.textContent = 'CSS 选择器（留空表示不隐藏）';
                 var cssInput = d.createElement('textarea');
+                cssInput.classList.add('css-input');
                 cssInput.setAttribute('spellcheck', 'false');
                 cssInput.value = rec.css || '';
                 cssLabel.appendChild(cssInput);
+
+                (state.hidePresets || []).forEach(function (p) {
+                    var b = d.createElement('button');
+                    b.classList.add('preset-btn');
+                    b.setAttribute('type', 'button');
+                    b.textContent = p.label;
+                    b.addEventListener('click', function () {
+                        cssInput.value = p.css || '';
+                    });
+                    presets.appendChild(b);
+                });
+
                 details.appendChild(summary);
+                details.appendChild(help);
+                details.appendChild(presets);
                 details.appendChild(cssLabel);
 
                 row.appendChild(head);
@@ -703,7 +743,9 @@
         els.addEngineBtn.addEventListener('click', function () {
             syncEditor();
             if (editorRows.length >= state.maxEngines) return;
-            editorRows.push({ name: '新搜索引擎', base: '', path: '/s', css: '' });
+            // 新建的引擎直接带上「通用」预设，用户不用面对一个空白的选择器输入框。
+            // 注意字段名要和 renderEditor 的入参一致（hideCss），否则默认值会被丢掉。
+            editorRows.push({ name: '新搜索引擎', base: '', path: '/s', hideCss: presetCSS('common') });
             renderEditor(editorRows);
         });
 
