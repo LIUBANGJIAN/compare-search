@@ -34,7 +34,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          # 本项目零第三方依赖（没有 go.sum），开启缓存只会得到一条
+          # "Dependencies file is not found" 的警告，直接关掉。
+          cache: false
 
       - name: gofmt
         run: |

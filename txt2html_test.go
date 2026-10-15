@@ -738,7 +738,7 @@ func TestConfigAPIPostWithHostOrigin(t *testing.T) {
 	}
 }
 
-func TestConfigAPIRejectsCorssSite(t *testing.T) {
+func TestConfigAPIRejectsCrossSite(t *testing.T) {
 	h, st, _, _ := newTestConfigAPI(t)
 
 	body := `{"source1":"http://192.0.2.41:1","source2":"http://192.0.2.42:2"}`
