@@ -9,6 +9,10 @@
 #
 # 刻意不使用 set -e：需要跑完全部断言后一次性汇总（告诉你到底坏了几处），
 # 而不是第一条失败就退出。
+#
+# ⚠️ 不要写 `cmd | grep -q ...`：在 pipefail 下这是**会随机假失败**的写法 ——
+# grep -q 一命中就退出，上游进程收到 SIGPIPE 返回非零，整条管道被判为失败。
+# 实测本机侥幸通过、容器里失败。所有内容匹配都先取到变量（或落文件）再比。
 set -uo pipefail
 
 ENGINE="${ENGINE:-docker}"
@@ -22,11 +26,18 @@ fi
 
 PANEL_PORT="${PANEL_PORT:-18899}"
 PROXY_PORT_BASE="${PROXY_PORT_BASE:-18898}"
+MAX_ENGINES="${MAX_ENGINES:-8}"
 SRC1_PORT="${SRC1_PORT:-11510}"
 SRC2_PORT="${SRC2_PORT:-8787}"
 SRC1_BASE="http://${UPSTREAM_HOST}:${SRC1_PORT}"
 SRC2_BASE="http://${UPSTREAM_HOST}:${SRC2_PORT}"
 PANEL="http://127.0.0.1:${PANEL_PORT}"
+
+# 需要暴露的端口区间：面板端口 + 全部引擎代理端口
+PORT_LO=$((PROXY_PORT_BASE - MAX_ENGINES + 1))
+PORT_HI="$PANEL_PORT"
+[ "$PORT_LO" -gt "$PANEL_PORT" ] && PORT_LO="$PANEL_PORT"
+[ "$PORT_HI" -lt "$PROXY_PORT_BASE" ] && PORT_HI="$PROXY_PORT_BASE"
 
 WORKDIR="$(mktemp -d)"
 CNAME="t2h-smoke-$$"
@@ -70,10 +81,12 @@ port_busy() {
     (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null || return 1
     return 0
 }
-if port_busy "$PANEL_PORT" || port_busy "$PROXY_PORT_BASE"; then
-    echo "::error title=端口被占用::127.0.0.1:${PANEL_PORT} 或 :${PROXY_PORT_BASE} 上已有进程在监听，请先停掉再跑冒烟"
-    exit 1
-fi
+for p in $(seq "$PORT_LO" "$PORT_HI"); do
+    if port_busy "$p"; then
+        echo "::error title=端口被占用::127.0.0.1:${p} 上已有进程在监听，请先停掉再跑冒烟"
+        exit 1
+    fi
+done
 
 # json_field <json 文本> <python 表达式，d 为解析后的对象>
 json_field() {
@@ -89,14 +102,15 @@ for _ in $(seq 1 40); do
     sleep 0.25
 done
 
-note "启动被测服务（ENGINE=$ENGINE）"
+note "启动被测服务（ENGINE=$ENGINE，端口区间 ${PORT_LO}-${PORT_HI}）"
 if [ "$ENGINE" = "docker" ]; then
+    # 必须把「面板端口 + 全部引擎代理端口」都映射出来：
+    # 每个搜索引擎都有自己的代理端口，只映射前两个会让第 3 个引擎起不来。
     docker run -d --name "$CNAME" \
         --add-host=host.docker.internal:host-gateway \
         -e SRC1_BASE="$SRC1_BASE" \
         -e SRC2_BASE="$SRC2_BASE" \
-        -p "127.0.0.1:${PANEL_PORT}:${PANEL_PORT}" \
-        -p "127.0.0.1:${PROXY_PORT_BASE}:${PROXY_PORT_BASE}" \
+        -p "127.0.0.1:${PORT_LO}-${PORT_HI}:${PORT_LO}-${PORT_HI}" \
         "$IMAGE" >/dev/null 2>&1
 else
     SRC1_BASE="$SRC1_BASE" \
@@ -140,11 +154,10 @@ E2_NAME=""
 if [ "$READY" = "1" ]; then
     HEALTH="$(cat "$WORKDIR/health.json")"
     pass "服务已就绪，/healthz 返回 200"
-    if printf '%s' "$HEALTH" | grep -q '"status":"ok"'; then
-        pass "/healthz 报告 status=ok"
-    else
-        fail "/healthz 未报告 status=ok（实际：$(head -c 200 "$WORKDIR/health.json")）"
-    fi
+    case "$HEALTH" in
+        *'"status":"ok"'*) pass "/healthz 报告 status=ok" ;;
+        *) fail "/healthz 未报告 status=ok（实际：$(head -c 200 "$WORKDIR/health.json")）" ;;
+    esac
     VER="$(json_field "$HEALTH" "d['version']")"
     if [ -n "$VER" ]; then
         pass "服务自报版本：$VER"
@@ -179,6 +192,12 @@ if [ "$READY" = "1" ]; then
     else
         fail "引擎代理端口分配失败（$E1_PORT / $E2_PORT）"
     fi
+    # 端口必须落在被映射出来的区间里，否则宿主机根本连不上
+    if [ -n "$E1_PORT" ] && [ "$E1_PORT" -ge "$PORT_LO" ] && [ "$E1_PORT" -le "$PORT_HI" ]; then
+        pass "引擎端口落在已映射区间内"
+    else
+        fail "引擎端口 $E1_PORT 不在映射区间 ${PORT_LO}-${PORT_HI} 内"
+    fi
 else
     fail "服务未在超时内就绪"
     if [ "$ENGINE" = "docker" ]; then
@@ -192,11 +211,11 @@ fi
 # 配置文件自动生成（首次启动就该有，不用等用户点保存）
 # ---------------------------------------------------------------------------
 note "配置文件自动生成"
-if read_config_file | grep -q '"engines"'; then
-    pass "首次启动即自动生成了配置文件（含 engines）"
-else
-    fail "配置文件未自动生成（实际：$(read_config_file | head -c 200)）"
-fi
+CFG_TEXT="$(read_config_file)"
+case "$CFG_TEXT" in
+    *'"engines"'*) pass "首次启动即自动生成了配置文件（含 engines）" ;;
+    *) fail "配置文件未自动生成（实际：$(printf '%s' "$CFG_TEXT" | head -c 200)）" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 面板页
@@ -229,6 +248,12 @@ case "$PAGE" in
     *'"proxyPort"'*) pass "面板页下发了各引擎的代理端口" ;;
     *) fail "面板页未下发引擎代理端口" ;;
 esac
+if [ -n "$E1_NAME" ]; then
+    case "$PAGE" in
+        *"$E1_NAME"*) pass "结果面板标题使用引擎名（$E1_NAME）" ;;
+        *) fail "结果面板标题未使用引擎名" ;;
+    esac
+fi
 # 番号栏能滚动的前提是外层高度固定：容器用固定 height，flex 子项 min-height:0，
 # 否则番号一多就把整页撑长（用户反馈过的问题）。这两条是防回退的护栏。
 case "$PAGE" in
@@ -239,12 +264,6 @@ case "$PAGE" in
     *'min-height: 0'*) pass "flex 子项允许收缩（min-height: 0）" ;;
     *) fail "flex 子项缺少 min-height: 0，番号栏无法滚动" ;;
 esac
-if [ -n "$E1_NAME" ]; then
-    case "$PAGE" in
-        *"$E1_NAME"*) pass "结果面板标题使用引擎名（$E1_NAME）" ;;
-        *) fail "结果面板标题未使用引擎名" ;;
-    esac
-fi
 
 # ---------------------------------------------------------------------------
 # 每个引擎各自的代理链路
@@ -256,16 +275,32 @@ check_engine_proxy() {
         fail "$label 没有可用端口"
         return
     fi
-    curl -s --max-time 5 -D "$WORKDIR/h.txt" "http://127.0.0.1:${port}${path}?q=abc" >"$WORKDIR/b.html"
+    local code
+    code="$(curl -s --max-time 5 -o "$WORKDIR/b.html" -D "$WORKDIR/h.txt" \
+        -w '%{http_code}' "http://127.0.0.1:${port}${path}?q=abc")"
+    # 先断言 HTTP 状态：否则请求失败时「头里没有 X-Frame-Options」会**假通过**
+    if [ "$code" = "200" ]; then
+        pass "$label 返回 200"
+    else
+        fail "$label 返回 HTTP $code（端口 $port 可能没被映射出来）"
+    fi
     local body
     body="$(cat "$WORKDIR/b.html")"
 
-    grep -qi '^x-frame-options:' "$WORKDIR/h.txt" \
-        && fail "$label 响应仍带 X-Frame-Options" \
-        || pass "$label 已剥离 X-Frame-Options"
-    grep -qi '^content-security-policy:' "$WORKDIR/h.txt" \
-        && fail "$label 响应仍带 Content-Security-Policy" \
-        || pass "$label 已剥离 Content-Security-Policy"
+    if grep -qi '^x-frame-options:' "$WORKDIR/h.txt"; then
+        fail "$label 响应仍带 X-Frame-Options"
+    elif [ "$code" = "200" ]; then
+        pass "$label 已剥离 X-Frame-Options"
+    else
+        fail "$label 无法判断是否剥离了 X-Frame-Options（请求未成功）"
+    fi
+    if grep -qi '^content-security-policy:' "$WORKDIR/h.txt"; then
+        fail "$label 响应仍带 Content-Security-Policy"
+    elif [ "$code" = "200" ]; then
+        pass "$label 已剥离 Content-Security-Policy"
+    else
+        fail "$label 无法判断是否剥离了 CSP（请求未成功）"
+    fi
     case "$body" in
         *data-local-inject*) pass "$label 已注入隐藏外壳样式" ;;
         *) fail "$label 未注入隐藏外壳样式" ;;
@@ -289,20 +324,20 @@ check_engine_proxy "引擎2 代理" "$E2_PORT" "/s" "MOCK-UPSTREAM-$SRC2_PORT"
 note "URL 直达检索"
 
 SEARCH="$(curl -s --max-time 5 "$PANEL/api/search?q=abc")"
-if printf '%s' "$SEARCH" | grep -q '"keyword":"abc"'; then
-    pass "GET /api/search 返回关键字"
-else
-    fail "GET /api/search 响应不正确（实际：$(head -c 200 <<<"$SEARCH")）"
-fi
+case "$SEARCH" in
+    *'"keyword":"abc"'*) pass "GET /api/search 返回关键字" ;;
+    *) fail "GET /api/search 响应不正确（实际：$(printf '%s' "$SEARCH" | head -c 200)）" ;;
+esac
 if [ "$(json_field "$SEARCH" "len(d['engines'])")" = "2" ]; then
     pass "GET /api/search 返回每个引擎的检索地址"
 else
     fail "GET /api/search 引擎地址数量不正确"
 fi
-if [ "$(json_field "$SEARCH" "d['engines'][0]['url']")" = "http://127.0.0.1:${E1_PORT}/files?q=abc" ]; then
+E1_URL="$(json_field "$SEARCH" "d['engines'][0]['url']")"
+if [ "$E1_URL" = "http://127.0.0.1:${E1_PORT}/files?q=abc" ]; then
     pass "检索地址用请求主机名 + 引擎端口拼装"
 else
-    fail "检索地址不正确（实际：$(json_field "$SEARCH" "d['engines'][0]['url']")）"
+    fail "检索地址不正确（实际：${E1_URL:-空}）"
 fi
 CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$PANEL/api/search")"
 if [ "$CODE" = "400" ]; then
@@ -310,11 +345,11 @@ if [ "$CODE" = "400" ]; then
 else
     fail "GET /api/search 缺少 q 应返回 400（实际 $CODE）"
 fi
-if curl -s --max-time 5 "$PANEL/?q=abc" | grep -q '"q":"abc"'; then
-    pass "面板页 /?q=abc 把关键字带进了引导数据"
-else
-    fail "面板页未把 URL 里的关键字带进引导数据"
-fi
+PAGE_Q="$(curl -s --max-time 5 "$PANEL/?q=abc")"
+case "$PAGE_Q" in
+    *'"q":"abc"'*) pass "面板页 /?q=abc 把关键字带进了引导数据" ;;
+    *) fail "面板页未把 URL 里的关键字带进引导数据" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 配置接口：读取 / 跨站拒绝 / 校验 / 增删引擎 / 热切换 / 持久化
@@ -326,7 +361,7 @@ CFG="$(curl -s --max-time 5 "$PANEL/api/config")"
 if [ "$(json_field "$CFG" "len(d['engines'])")" = "2" ]; then
     pass "GET /api/config 返回引擎列表"
 else
-    fail "GET /api/config 响应不正确（实际：$(head -c 200 <<<"$CFG")）"
+    fail "GET /api/config 响应不正确（实际：$(printf '%s' "$CFG" | head -c 200)）"
 fi
 
 CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
@@ -382,6 +417,14 @@ if [ -n "$E3_PORT" ] && [ "$E3_PORT" != "0" ]; then
 else
     fail "新增引擎没有拿到代理端口（实际 ${E3_PORT:-空}）"
 fi
+# 新增的那个引擎必须真的能通过它的端口取到内容（这是端口池 + 映射都对的最终判据）
+if [ -n "$E3_PORT" ] && [ "$E3_PORT" != "0" ]; then
+    E3_BODY="$(curl -s --max-time 5 "http://127.0.0.1:${E3_PORT}/s?q=abc")"
+    case "$E3_BODY" in
+        *"MOCK-UPSTREAM-$SRC1_PORT"*) pass "新增引擎的代理端口真的可用" ;;
+        *) fail "新增引擎的代理端口取不到内容（实际：$(printf '%s' "$E3_BODY" | head -c 200)）" ;;
+    esac
+fi
 
 curl -s --max-time 5 "http://127.0.0.1:${E1_PORT}/files?q=abc" >"$WORKDIR/b1b.html"
 case "$(cat "$WORKDIR/b1b.html")" in
@@ -389,18 +432,18 @@ case "$(cat "$WORKDIR/b1b.html")" in
     *) fail "引擎1 代理未热切换（实际：$(head -c 200 "$WORKDIR/b1b.html")）" ;;
 esac
 
-if read_config_file | grep -q "$SRC2_BASE"; then
-    pass "配置已落盘，重启后仍生效（持久化）"
-else
-    fail "配置文件未落盘或内容不正确（实际：$(read_config_file | head -c 200)）"
-fi
+CFG_TEXT="$(read_config_file)"
+case "$CFG_TEXT" in
+    *"$SRC2_BASE"*) pass "配置已落盘，重启后仍生效（持久化）" ;;
+    *) fail "配置文件未落盘或内容不正确（实际：$(printf '%s' "$CFG_TEXT" | head -c 200)）" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 汇总
 # ---------------------------------------------------------------------------
 # 断言计数下限：不使用 set -e 的脚本，「半途没跑起来」与「全部通过」退出码都是 0，
 # 这条锁专堵那种空转的绿。取实际条数的一半左右并留富余，别贴着实际值。
-MIN_CHECKS=24
+MIN_CHECKS=26
 if [ "$CHECKS" -lt "$MIN_CHECKS" ]; then
     echo "::error title=断言数异常::只执行了 ${CHECKS} 条，低于下限 ${MIN_CHECKS}"
     exit 1
