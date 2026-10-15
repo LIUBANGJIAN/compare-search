@@ -130,9 +130,10 @@ func main() {
 	}
 
 	fmt.Println("\n========================================")
-	fmt.Printf("  面板页：%s\n", pageURL)
-	fmt.Printf("  关键字直达：%s/?q=关键字\n", pageURL)
-	fmt.Printf("  检索接口：%s/api/search?q=关键字\n", pageURL)
+	fmt.Printf("  这个网站：%s\n", pageURL)
+	fmt.Printf("  带关键字直接检索：%s/?q=关键字\n", pageURL)
+	fmt.Printf("    其它程序只要拼这一个 URL 即可；也支持 ?keyword= / ?kw= 等写法\n")
+	fmt.Printf("  取直达地址的接口：%s/api/search?q=关键字\n", pageURL)
 	fmt.Printf("  配置文件：%s\n", store.pathOf())
 	fmt.Printf("  引擎代理端口：%d 起（共预留 %d 个）\n", dep.ProxyPortBase, maxEngines)
 	fmt.Println("  ── 搜索引擎 ──")
@@ -157,10 +158,12 @@ func printBanner() {
 }
 
 // checkDataDir 提前探测数据目录是否可写。
-// bind mount 到宿主机目录时若属主是 root，非 root 进程写不进去，
-// 而这个错误往往要等到用户点「保存设置」才暴露 —— 这里提前说清楚。
+// Docker 里把宿主目录 bind mount 到 /data 时，目录属主往往是 root，
+// 非 root 进程（uid 10001）写不进去，而这个错误要等到用户点「保存设置」才暴露 ——
+// 这里提前说清楚，并给出可以直接照抄的命令。
 func checkDataDir(dep deployment) {
 	seen := map[string]bool{}
+	bad := false
 	for _, f := range []string{dep.ConfigFile, dep.CookieFile} {
 		dir := filepath.Dir(f)
 		if seen[dir] {
@@ -169,12 +172,20 @@ func checkDataDir(dep deployment) {
 		seen[dir] = true
 		probe := filepath.Join(dir, ".write-probe")
 		if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
-			fmt.Printf("⚠️  数据目录不可写：%s\n     原因：%v\n", dir, err)
-			fmt.Printf("     页面上的「保存设置」会失败。若用 bind mount，请在宿主机执行：\n")
-			fmt.Printf("     chown -R 10001:10001 %s\n", dir)
+			bad = true
+			fmt.Println()
+			fmt.Println("  ❗❗ 数据目录不可写，配置与 Cookie 无法保存 ❗❗")
+			fmt.Printf("     目录：%s\n", dir)
+			fmt.Printf("     原因：%v\n", err)
+			fmt.Println("     Docker bind mount 时目录属主通常是 root，请在宿主机上执行：")
+			fmt.Printf("         chown -R 10001:10001 <宿主机上映射到 %s 的那个目录>\n", dir)
+			fmt.Println("     （服务本身仍可用，只是「保存设置」会失败、重启后配置会丢）")
 			continue
 		}
 		_ = os.Remove(probe)
+	}
+	if bad {
+		fmt.Println()
 	}
 }
 
@@ -423,7 +434,11 @@ func startServers(dep deployment, store *settingsStore, items []string) (string,
 	mux.HandleFunc("/api/config", makeConfigHandler(store, reg, dep, itemCount))
 	mux.HandleFunc("/api/search", makeSearchAPI(store, reg, itemCount))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
+		// 面板页：根路径；另外 /search?q=xxx 也当面板页处理，
+		// 这样「这个网站的检索入口」不止一种拼法，对接方怎么写都能用。
+		keyword := queryFromRequest(r)
+		isPanel := r.URL.Path == "/" || (r.URL.Path == "/search" && keyword != "")
+		if !isPanel {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, notFoundPage(r.URL.Path))
@@ -448,7 +463,7 @@ func startServers(dep deployment, store *settingsStore, items []string) (string,
 			Engines:    payload,
 			Origin:     string(orig),
 			Version:    version,
-			Query:      strings.TrimSpace(r.URL.Query().Get("q")),
+			Query:      keyword,
 			MaxEngines: maxEngines,
 		}))
 	})
@@ -481,13 +496,16 @@ func placeholderPage(slot int) string {
 
 func notFoundPage(path string) string {
 	return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">` +
-		`<style>body{font-family:-apple-system,"Segoe UI",Arial,sans-serif;color:#334155;padding:32px;line-height:1.8}` +
+		`<style>body{font-family:-apple-system,"Segoe UI",Arial,sans-serif;color:#334155;padding:32px;line-height:1.9}` +
 		`code{background:#f1f5f9;padding:2px 6px;border-radius:4px}</style></head><body>` +
-		`<h3>404 · 面板端口上没有这个路径</h3>` +
+		`<h3>404 · 这个路径不存在</h3>` +
 		`<p>请求路径：<code>` + htmlEscape(path) + `</code></p>` +
-		`<p>面板端口只提供：<code>/</code>（面板页）、<code>/?q=关键字</code>（直达检索）、` +
-		`<code>/api/search?q=关键字</code>（JSON 接口）、<code>/api/config</code>、<code>/healthz</code></p>` +
-		`<p>各搜索引擎有自己的代理端口，见面板页或 <code>/healthz</code>。</p>` +
+		`<p>本网站只提供这几个入口：</p>` +
+		`<p>· <code>/</code> —— 检索面板</p>` +
+		`<p>· <code>/?q=关键字</code> —— <b>带关键字直接检索</b>（其它程序对接用这个）</p>` +
+		`<p>· <code>/api/search?q=关键字</code> —— 返回直达地址的 JSON</p>` +
+		`<p>· <code>/api/config</code> —— 搜索引擎配置（GET 读 / POST 写）</p>` +
+		`<p>· <code>/healthz</code> —— 健康检查</p>` +
 		`</body></html>`
 }
 

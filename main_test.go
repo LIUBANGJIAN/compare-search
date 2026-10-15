@@ -285,6 +285,42 @@ func TestWriteFileAtomicLeavesNoTempFiles(t *testing.T) {
 // 引擎注册表
 // ---------------------------------------------------------------------------
 
+func TestWriteFileAtomicReportsPathOnFailure(t *testing.T) {
+	// 父路径是一个文件而不是目录 —— 建目录就会失败
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := writeFileAtomic(filepath.Join(blocker, "settings.json"), []byte("{}"), 0o600)
+	if err == nil {
+		t.Fatal("父路径是文件时应报错")
+	}
+	if !strings.Contains(err.Error(), "blocker") {
+		t.Errorf("错误信息里应带上出问题的路径：%v", err)
+	}
+}
+
+func TestSettingsStoreSaveMentionsDataDirOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := &settingsStore{
+		path: filepath.Join(blocker, "settings.json"),
+		cfg:  settings{Engines: []engine{eng("A", "http://192.0.2.21:1", "/s")}},
+		orig: originDefault,
+	}
+	err := st.save(settings{Engines: []engine{eng("A", "http://192.0.2.21:1", "/s")}})
+	if err == nil {
+		t.Fatal("写入失败时应返回错误")
+	}
+	if !strings.Contains(err.Error(), "失败") {
+		t.Errorf("错误信息应说明是哪一步失败：%v", err)
+	}
+}
+
 func TestEngineRegistry(t *testing.T) {
 	reg := &engineRegistry{}
 	ports := make([]int, maxEngines)
@@ -905,10 +941,14 @@ func TestSearchAPI(t *testing.T) {
 	if got.Keyword != "中文" {
 		t.Errorf("关键字不正确：%q", got.Keyword)
 	}
-	if len(got.Engines) != 2 {
-		t.Fatalf("应返回 2 个引擎的地址，实际 %d", len(got.Engines))
+	// 主字段必须是「这个网站带关键字」的直达地址 —— 对接方只需要这一个 URL
+	wantPage := "http://192.0.2.9:18899/?q=" + url.QueryEscape("中文")
+	if got.URL != wantPage {
+		t.Errorf("网站直达地址不正确：\n实际 %s\n期望 %s", got.URL, wantPage)
 	}
-	// 必须用请求里的主机名拼装，局域网其它机器调用时才可用
+	if len(got.Engines) != 2 {
+		t.Fatalf("补充的引擎地址应为 2 条，实际 %d", len(got.Engines))
+	}
 	want := "http://192.0.2.9:18898/s?q=" + url.QueryEscape("中文")
 	if got.Engines[0].URL != want {
 		t.Errorf("引擎地址不正确：\n实际 %s\n期望 %s", got.Engines[0].URL, want)
@@ -919,9 +959,56 @@ func TestSearchAPI(t *testing.T) {
 	if got.ItemCount != 3 {
 		t.Errorf("番号数不正确：%d", got.ItemCount)
 	}
-	if !strings.Contains(got.PageURL, "/?q=") {
-		t.Errorf("应给出面板直达地址：%q", got.PageURL)
+}
+
+func TestSearchAPIAcceptsCommonParameterNames(t *testing.T) {
+	_, _, reg, _ := newTestConfigAPI(t)
+	h := makeSearchAPI(nil, reg, func() int { return 0 })
+
+	for _, key := range []string{"q", "keyword", "kw", "word", "search"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/search?"+key+"=abc", nil)
+		req.Host = "h:18899"
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Errorf("参数名 %s 应被接受，实际 %d", key, rr.Code)
+			continue
+		}
+		var got searchPayload
+		_ = json.Unmarshal(rr.Body.Bytes(), &got)
+		if got.Keyword != "abc" {
+			t.Errorf("参数名 %s 未取到关键字：%q", key, got.Keyword)
+		}
 	}
+}
+
+func TestQueryFromRequest(t *testing.T) {
+	cases := map[string]string{
+		"/?q=abc":             "abc",
+		"/?keyword=abc":       "abc",
+		"/?kw=abc":            "abc",
+		"/?word=abc":          "abc",
+		"/?search=abc":        "abc",
+		"/?q=%E4%B8%AD":       "中",
+		"/?q=%20%20abc%20%20": "abc",
+		"/?q=":                "",
+		"/":                   "",
+		"/?other=1":           "",
+		"/?q=&keyword=xyz":    "xyz",
+	}
+	for target, want := range cases {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		if got := queryFromRequest(req); got != want {
+			t.Errorf("queryFromRequest(%q) = %q，期望 %q", target, got, want)
+		}
+	}
+}
+
+// newTestAPIOnly 只要一个注册表就够了（用于 /api/search 的用例）。
+func newTestAPIOnly(t *testing.T) (*engineRegistry, deployment) {
+	t.Helper()
+	_, _, reg, dep := newTestConfigAPI(t)
+	return reg, dep
 }
 
 func TestSearchAPIRejectsMissingKeyword(t *testing.T) {
@@ -1039,16 +1126,38 @@ func TestStartServersEndToEnd(t *testing.T) {
 		t.Logf("端口基址 %d 被占用，已回退到随机端口，跳过空引擎位断言", dep.ProxyPortBase)
 	}
 
-	// 5) /api/search 给出各引擎地址（用面板端口访问）
+	// 5) /api/search：主字段应是「这个网站带关键字」的直达地址
 	var sp searchPayload
 	if err := json.Unmarshal([]byte(httpGet(t, pageURL+"/api/search?q=abc")), &sp); err != nil {
 		t.Fatalf("/api/search 响应不合法：%v", err)
+	}
+	wantPage := pageURL + "/?q=abc"
+	if sp.URL != wantPage {
+		t.Errorf("/api/search 的网站直达地址不正确：\n实际 %s\n期望 %s", sp.URL, wantPage)
 	}
 	if len(sp.Engines) != 2 || !strings.Contains(sp.Engines[0].URL, "/files?q=abc") {
 		t.Errorf("/api/search 内容不正确：%+v", sp)
 	}
 	if sp.Engines[0].URL != "http://127.0.0.1:"+strconv.Itoa(p0)+"/files?q=abc" {
 		t.Errorf("/api/search 里的端口不对：%s", sp.Engines[0].URL)
+	}
+
+	// 6) 这个网站带关键字的几种写法都要能用
+	for _, target := range []string{"/?q=abc", "/search?q=abc", "/?keyword=abc", "/?kw=abc"} {
+		page := httpGet(t, pageURL+target)
+		if !strings.Contains(page, `id="bootstrap"`) || !strings.Contains(page, `"q":"abc"`) {
+			t.Errorf("%s 未把关键字带进面板页", target)
+		}
+	}
+	// 没带关键字的 /search 不是面板页，应给 404
+	respSearch, err := http.Get(pageURL + "/search")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, respSearch.Body)
+	respSearch.Body.Close()
+	if respSearch.StatusCode != http.StatusNotFound {
+		t.Errorf("不带关键字的 /search 应返回 404，实际 %d", respSearch.StatusCode)
 	}
 
 	// 6) 通过配置接口改第 1 个引擎地址，代理应立即指向新上游

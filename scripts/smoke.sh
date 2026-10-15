@@ -225,7 +225,7 @@ curl -s --max-time 5 "$PANEL/" >"$WORKDIR/page.html"
 PAGE="$(cat "$WORKDIR/page.html")"
 
 for id in kwInput searchBtn settingsBtn pager pagerInfo pagerKw prevBtn nextBtn \
-    clearBtn listBox codesToggle splitter settingsDialog engineList addEngineBtn resultsCol; do
+    clearBtn listBox codesToggle splitter settingsDialog directLink engineList addEngineBtn resultsCol; do
     case "$PAGE" in
         *"id=\"$id\""*) pass "面板页含 #$id" ;;
         *) fail "面板页缺少 #$id" ;;
@@ -319,36 +319,47 @@ check_engine_proxy "引擎1 代理" "$E1_PORT" "/files" "MOCK-UPSTREAM-$SRC1_POR
 check_engine_proxy "引擎2 代理" "$E2_PORT" "/s" "MOCK-UPSTREAM-$SRC2_PORT"
 
 # ---------------------------------------------------------------------------
-# URL 直达检索
+# 这个网站「带关键字直接检索」—— 对接方只需要这一个 URL
 # ---------------------------------------------------------------------------
-note "URL 直达检索"
+note "带关键字直接检索"
 
 SEARCH="$(curl -s --max-time 5 "$PANEL/api/search?q=abc")"
 case "$SEARCH" in
     *'"keyword":"abc"'*) pass "GET /api/search 返回关键字" ;;
     *) fail "GET /api/search 响应不正确（实际：$(printf '%s' "$SEARCH" | head -c 200)）" ;;
 esac
+DIRECT="$(json_field "$SEARCH" "d['url']")"
+if [ "$DIRECT" = "${PANEL}/?q=abc" ]; then
+    pass "主字段就是这个网站的直达地址：$DIRECT"
+else
+    fail "网站直达地址不正确（实际：${DIRECT:-空}）"
+fi
 if [ "$(json_field "$SEARCH" "len(d['engines'])")" = "2" ]; then
-    pass "GET /api/search 返回每个引擎的检索地址"
+    pass "附带返回各引擎地址（仅供需要直抓某引擎 HTML 的场景）"
 else
-    fail "GET /api/search 引擎地址数量不正确"
+    fail "附带的引擎地址数量不正确"
 fi
-E1_URL="$(json_field "$SEARCH" "d['engines'][0]['url']")"
-if [ "$E1_URL" = "http://127.0.0.1:${E1_PORT}/files?q=abc" ]; then
-    pass "检索地址用请求主机名 + 引擎端口拼装"
-else
-    fail "检索地址不正确（实际：${E1_URL:-空}）"
-fi
+
+# 这个网站带关键字的几种写法都要能用
+for target in "/?q=abc" "/search?q=abc" "/?keyword=abc" "/?kw=abc"; do
+    BODY="$(curl -s --max-time 5 "${PANEL}${target}")"
+    case "$BODY" in
+        *'"q":"abc"'*) pass "这个网站 ${target} 能带关键字检索" ;;
+        *) fail "${target} 未把关键字带进面板页" ;;
+    esac
+done
+
 CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$PANEL/api/search")"
 if [ "$CODE" = "400" ]; then
-    pass "GET /api/search 缺少 q 时返回 400"
+    pass "GET /api/search 缺少关键字时返回 400"
 else
-    fail "GET /api/search 缺少 q 应返回 400（实际 $CODE）"
+    fail "GET /api/search 缺少关键字应返回 400（实际 $CODE）"
 fi
-PAGE_Q="$(curl -s --max-time 5 "$PANEL/?q=abc")"
-case "$PAGE_Q" in
-    *'"q":"abc"'*) pass "面板页 /?q=abc 把关键字带进了引导数据" ;;
-    *) fail "面板页未把 URL 里的关键字带进引导数据" ;;
+
+PAGE404="$(curl -s --max-time 5 "$PANEL/some-unknown-path")"
+case "$PAGE404" in
+    *'/?q='*) pass "404 页面把「带关键字检索」的用法写出来了" ;;
+    *) fail "404 页面未提示带关键字检索的用法" ;;
 esac
 
 # ---------------------------------------------------------------------------

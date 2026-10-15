@@ -288,7 +288,7 @@ const ENGINES_BOOT = [
 const BOOT_ITEMS = ['ABP-123', 'SSIS-001', 'IPX-777'];
 const ALL_IDS = ['resultsCol', 'kwInput', 'searchBtn', 'settingsBtn', 'prevBtn', 'nextBtn',
     'pager', 'pagerInfo', 'pagerKw', 'clearBtn', 'listBox', 'codesCount',
-    'codesToggle', 'layout', 'splitter', 'settingsDialog', 'engineList',
+    'codesToggle', 'layout', 'splitter', 'settingsDialog', 'directLink', 'engineList',
     'addEngineBtn', 'settingsHint', 'settingsSave', 'settingsCancel', 'bootstrap'];
 
 function buildDoc(boot, ids) {
@@ -318,7 +318,7 @@ global.document = {
 };
 
 global.window = {
-    location: { protocol: 'http:', hostname: '127.0.0.1', port: '18899' },
+    location: { protocol: 'http:', hostname: '127.0.0.1', port: '18899', host: '127.0.0.1:18899' },
     fetch: () => Promise.reject(new Error('测试未提供 fetch 实现'))
 };
 global.localStorage = {
@@ -502,6 +502,10 @@ ok('清空会复位列表与所有引擎的 iframe', () => {
         byId.settingsBtn.fire('click');
         eq(byId.engineList.findAll('engine-row').length, 2);
         includes(byId.settingsHint.textContent, '内置默认值');
+    });
+
+    await okAsync('设置里显示「这个网站带关键字」的直达地址', async () => {
+        eq(byId.directLink.textContent, 'http://127.0.0.1:18899/?q=关键字');
     });
 
     await okAsync('点「新增搜索引擎」多出一行', async () => {

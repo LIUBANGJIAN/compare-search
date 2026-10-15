@@ -19,7 +19,10 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
 
     volumes:
-      # 换宿主机目录就改 DATA_DIR（默认当前目录下的 ./data）
+      # 换宿主机目录就改 DATA_DIR（默认当前目录下的 ./data）。
+      # ⚠️ 用宿主目录（bind mount）时，容器里是非 root（uid 10001）跑的，
+      #    如果这个目录属主是 root，程序就写不进 settings.json（「保存设置」会失败）。
+      #    先执行：mkdir -p <目录> && chown -R 10001:10001 <目录>
       - ${DATA_DIR:-./data}:/data
 
     logging:

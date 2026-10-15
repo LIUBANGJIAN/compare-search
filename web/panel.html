@@ -312,6 +312,27 @@
         dialog.settings h2 { margin: 0 0 4px; font-size: 1rem; font-weight: 600; }
         dialog.settings .sub { margin: 0 0 14px; font-size: 0.8rem; color: #64748b; line-height: 1.6; }
         dialog.settings code { background: #f1f5f9; padding: 1px 5px; border-radius: 4px; font-size: 0.78rem; }
+        .direct-box {
+            margin: 0 0 14px;
+            padding: 10px 12px;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+        }
+        .direct-label { display: block; font-size: 0.75rem; font-weight: 600; color: #64748b; margin-bottom: 5px; }
+        .direct-box code#directLink {
+            display: block;
+            font-size: 0.8rem;
+            color: #0f172a;
+            background: #fff;
+            padding: 6px 8px;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            word-break: break-all;
+            user-select: all;
+        }
+        .direct-note { display: block; margin-top: 5px; font-size: 0.72rem; color: #94a3b8; line-height: 1.6; }
+        .direct-note code { background: #eef2f7; }
         #engineList { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding-right: 2px; }
         .engine-row {
             border: 1px solid #e2e8f0;
@@ -414,6 +435,11 @@
             <h2>搜索引擎设置</h2>
             <p class="sub">可添加任意多个搜索引擎。保存后立即生效并写入配置文件持久化。
                 搜索路径是引擎自己的检索地址，程序会自动在后面追加 <code>?q=关键字</code>。</p>
+            <div class="direct-box">
+                <span class="direct-label">带关键字直接检索（其它程序对接 / 浏览器书签都用这一个地址）</span>
+                <code id="directLink"></code>
+                <span class="direct-note">把「关键字」三个字换成你要搜的内容即可，也支持 <code>?keyword=</code> / <code>?kw=</code> 写法</span>
+            </div>
             <div id="engineList"></div>
             <p class="hint" id="settingsHint"></p>
             <div class="dialog-actions">

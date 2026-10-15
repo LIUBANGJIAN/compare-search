@@ -137,6 +137,11 @@ func (s *settingsStore) save(next settings) error {
 	data = append(data, '\n')
 
 	if err := writeFileAtomic(s.path, data, 0o600); err != nil {
+		// 权限问题单独说清楚：Docker 里挂宿主机目录时最常见，且提示必须可执行
+		if errors.Is(err, os.ErrPermission) {
+			return fmt.Errorf("写入 %s 失败：%w。数据目录不可写 —— "+
+				"若用 Docker bind mount，请在宿主机执行 chown -R 10001:10001 <映射到该目录的宿主路径>", s.path, err)
+		}
 		return fmt.Errorf("写入 %s 失败：%w", s.path, err)
 	}
 
@@ -409,8 +414,13 @@ func makeConfigHandler(store *settingsStore, reg *engineRegistry, dep deployment
 }
 
 // ---------------------------------------------------------------------------
-// /api/search：给其他程序调用的关键字检索入口
+// /api/search：这个网站的「带关键字直达」入口
 // ---------------------------------------------------------------------------
+//
+// 对接方要的其实是「给这个网站一个关键字」——所以主字段就是本机的直达地址：
+//     http://<host>:<面板端口>/?q=关键字
+// 下面 engines 里的每引擎地址只是补充信息，供确实需要直接抓某个引擎 HTML 的场景使用，
+// 正常对接不需要关心它。
 
 type searchHit struct {
 	Name string `json:"name"`
@@ -419,13 +429,13 @@ type searchHit struct {
 
 type searchPayload struct {
 	Keyword   string      `json:"keyword"`
-	PageURL   string      `json:"pageUrl"`
+	URL       string      `json:"url"`
 	Engines   []searchHit `json:"engines"`
 	ItemCount int         `json:"itemCount"`
 }
 
-// makeSearchAPI 返回 JSON：把关键字换成各引擎的检索地址，方便脚本/浏览器书签直接调用。
-// 返回的 URL 用请求自带的 Host 拼装，因此从局域网其它机器调用时拿到的也是可用地址。
+// makeSearchAPI 返回 JSON：给一个关键字，换回「打开本网站并检索」的直达地址。
+// 返回的地址用请求自带的 Host 拼装，因此从局域网其它机器调用时拿到的也是可用地址。
 func makeSearchAPI(store *settingsStore, reg *engineRegistry, itemCount func() int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -433,7 +443,7 @@ func makeSearchAPI(store *settingsStore, reg *engineRegistry, itemCount func() i
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "只支持 GET"})
 			return
 		}
-		keyword := strings.TrimSpace(r.URL.Query().Get("q"))
+		keyword := queryFromRequest(r)
 		if keyword == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少查询参数 q"})
 			return
@@ -443,6 +453,7 @@ func makeSearchAPI(store *settingsStore, reg *engineRegistry, itemCount func() i
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
 		}
+		panelPort := portOfHost(r.Host)
 
 		hits := make([]searchHit, 0, len(reg.snapshot()))
 		for _, rt := range reg.snapshot() {
@@ -458,11 +469,31 @@ func makeSearchAPI(store *settingsStore, reg *engineRegistry, itemCount func() i
 
 		writeJSON(w, http.StatusOK, searchPayload{
 			Keyword:   keyword,
-			PageURL:   "http://" + r.Host + "/?q=" + url.QueryEscape(keyword),
+			URL:       "http://" + net.JoinHostPort(host, panelPort) + "/?q=" + url.QueryEscape(keyword),
 			Engines:   hits,
 			ItemCount: itemCount(),
 		})
 	}
+}
+
+// portOfHost 从 Host 头里取端口，取不到就用面板端口的默认值。
+func portOfHost(host string) string {
+	if _, p, err := net.SplitHostPort(host); err == nil {
+		return p
+	}
+	return fmt.Sprint(defaultPagePort)
+}
+
+// queryFromRequest 从 URL 里取关键字，宽容几种常见参数名 ——
+// 对接方写 ?keyword= 或 ?kw= 也能直接工作。
+func queryFromRequest(r *http.Request) string {
+	q := r.URL.Query()
+	for _, key := range []string{"q", "keyword", "kw", "word", "search"} {
+		if v := strings.TrimSpace(q.Get(key)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // sameOrigin 判断请求是否来自本站。

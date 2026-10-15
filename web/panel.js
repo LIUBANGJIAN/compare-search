@@ -135,6 +135,7 @@
             layout: d.getElementById('layout'),
             splitter: d.getElementById('splitter'),
             dialog: d.getElementById('settingsDialog'),
+            directLink: d.getElementById('directLink'),
             engineList: d.getElementById('engineList'),
             addEngineBtn: d.getElementById('addEngineBtn'),
             settingsHint: d.getElementById('settingsHint'),
@@ -644,6 +645,8 @@
         }
 
         function openSettings() {
+            // 这个网站本身就支持带关键字打开 —— 把地址显示出来，别的程序照着拼就行
+            els.directLink.textContent = proto + '//' + window.location.host + '/?q=关键字';
             renderEditor(state.engines);
             setHint('当前生效来源：' + (state.origin || '未知'), '');
             if (typeof els.dialog.showModal === 'function') {
