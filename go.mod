@@ -1,3 +1,3 @@
-module txt2html
+module compare-search
 
 go 1.22

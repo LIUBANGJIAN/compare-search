@@ -10,7 +10,7 @@ ARG VERSION=docker
 RUN CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
         -ldflags="-s -w -X main.version=${VERSION}" \
-        -o /out/txt2html .
+        -o /out/compare-search .
 
 FROM alpine:3.20
 
@@ -18,7 +18,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata \
     && adduser -D -u 10001 -h /data app
 
-COPY --from=builder /out/txt2html /usr/local/bin/txt2html
+COPY --from=builder /out/compare-search /usr/local/bin/compare-search
 
 # 容器内必须监听所有网卡，否则宿主映射进来的端口连不上
 # 数据文件统一放在 /data（声明为 VOLUME，便于挂载持久化）
@@ -39,4 +39,4 @@ EXPOSE 18899 18898
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget -q -O /dev/null "http://127.0.0.1:${PAGE_PORT:-18899}/healthz" || exit 1
 
-ENTRYPOINT ["/usr/local/bin/txt2html"]
+ENTRYPOINT ["/usr/local/bin/compare-search"]

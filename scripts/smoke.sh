@@ -3,7 +3,7 @@
 # 冒烟测试：真的把服务跑起来，验证面板页、两条代理链路、以及配置接口与持久化。
 #
 #   ENGINE=docker IMAGE=<镜像> bash scripts/smoke.sh   # CI 默认（真跑镜像）
-#   ENGINE=local  BIN=./txt2html.exe bash scripts/smoke.sh
+#   ENGINE=local  BIN=./compare-search.exe bash scripts/smoke.sh
 #
 # 两种引擎共用同一套断言，保证 CI 里验的就是本机验过的同一件事。
 #
@@ -13,7 +13,7 @@ set -uo pipefail
 
 ENGINE="${ENGINE:-docker}"
 IMAGE="${IMAGE:-compare-search:smoke}"
-BIN="${BIN:-./txt2html}"
+BIN="${BIN:-./compare-search}"
 if [ "$ENGINE" = "local" ]; then
     : "${UPSTREAM_HOST:=127.0.0.1}"
 else

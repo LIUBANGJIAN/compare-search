@@ -7,8 +7,8 @@ cookie_115.txt
 .workbuddy/
 
 # 构建产物
-txt2html
-txt2html.exe
+compare-search
+compare-search.exe
 *.exe
 /out/
 
