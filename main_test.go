@@ -330,6 +330,166 @@ func TestBuildPageCarriesHidePresets(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 启用 / 停用
+// ---------------------------------------------------------------------------
+
+func boolPtr(v bool) *bool { return &v }
+
+func TestEngineEnabledDefaultsToTrue(t *testing.T) {
+	// 老配置文件里没有 enabled 字段 —— 必须当成启用
+	var e engine
+	if err := json.Unmarshal([]byte(`{"name":"A","base":"http://192.0.2.20:1","path":"/s"}`), &e); err != nil {
+		t.Fatal(err)
+	}
+	if !e.isEnabled() {
+		t.Error("缺省应视为启用")
+	}
+	if err := json.Unmarshal([]byte(`{"name":"A","base":"http://192.0.2.20:1","path":"/s","enabled":false}`), &e); err != nil {
+		t.Fatal(err)
+	}
+	if e.isEnabled() {
+		t.Error("显式 false 应视为停用")
+	}
+}
+
+func TestNormalizeEnginePreservesEnabled(t *testing.T) {
+	off := eng("A", "http://192.0.2.20:1", "/s")
+	off.Enabled = boolPtr(false)
+	out, err := normalizeEngine(off, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.isEnabled() {
+		t.Error("归一化时把 enabled 丢了")
+	}
+
+	on := eng("A", "http://192.0.2.20:1", "/s")
+	on.Enabled = boolPtr(true)
+	out, _ = normalizeEngine(on, 0)
+	if !out.isEnabled() {
+		t.Error("enabled=true 应保持不变")
+	}
+}
+
+func TestRegistrySkipsDisabledEngines(t *testing.T) {
+	reg := &engineRegistry{}
+	reg.setPorts([]int{18898, 18897, 18896})
+
+	a := eng("A", "http://192.0.2.21:1", "/s")
+	b := eng("B", "http://192.0.2.22:2", "/s")
+	b.Enabled = boolPtr(false)
+	c := eng("C", "http://192.0.2.23:3", "/s")
+
+	if err := reg.apply([]engine{a, b, c}); err != nil {
+		t.Fatal(err)
+	}
+	got := reg.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("停用的引擎不应进入运行时，实际 %d 个", len(got))
+	}
+	if got[0].eng.Name != "A" || got[0].port != 18898 {
+		t.Errorf("第 1 个运行时引擎不对：%+v", got[0])
+	}
+	// 端口按「启用的引擎」连续分配，不能因为中间停用而错位
+	if got[1].eng.Name != "C" || got[1].port != 18897 {
+		t.Errorf("停用中间那个后，后面的引擎应接上下一个端口：%+v", got[1])
+	}
+}
+
+func TestEnginePayloadsMapPortsAcrossDisabled(t *testing.T) {
+	a := eng("A", "http://192.0.2.21:1", "/s")
+	b := eng("B", "http://192.0.2.22:2", "/s")
+	b.Enabled = boolPtr(false)
+	c := eng("C", "http://192.0.2.23:3", "/s")
+
+	list := enginePayloads([]engine{a, b, c}, []engineRuntime{
+		{eng: a, port: 18898},
+		{eng: c, port: 18897},
+	})
+	if len(list) != 3 {
+		t.Fatalf("配置里的 3 个引擎都要下发（设置里要能看到停用的），实际 %d 个", len(list))
+	}
+	if !list[0].Enabled || list[0].ProxyPort != 18898 {
+		t.Errorf("A 应为启用且端口 18898：%+v", list[0])
+	}
+	if list[1].Enabled {
+		t.Error("B 应为停用")
+	}
+	if list[1].ProxyPort != 0 {
+		t.Errorf("停用的引擎不应有端口：%d", list[1].ProxyPort)
+	}
+	if !list[2].Enabled || list[2].ProxyPort != 18897 {
+		t.Errorf("C 应接上 A 之后的端口 18897：%+v", list[2])
+	}
+}
+
+func TestSettingsStorePersistsDisabledFlag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	st, err := newSettingsStore(path, settings{}, originDefault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := eng("A", "http://192.0.2.21:1", "/s")
+	b := eng("B", "http://192.0.2.22:2", "/s")
+	b.Enabled = boolPtr(false)
+	if err := st.save(settings{Engines: []engine{a, b}}); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), `"enabled": false`) {
+		t.Errorf("停用状态应写进配置文件：%s", raw)
+	}
+
+	again, _ := newSettingsStore(path, settings{}, originDefault)
+	got, _ := again.snapshot()
+	if got.Engines[1].isEnabled() {
+		t.Error("重启后停用状态丢了")
+	}
+	if !got.Engines[0].isEnabled() {
+		t.Error("启用状态被误改")
+	}
+}
+
+func TestConfigAPITogglesEngine(t *testing.T) {
+	h, st, reg, _ := newTestConfigAPI(t)
+
+	body := `{"engines":[` +
+		`{"name":"甲","base":"http://192.0.2.21:1","path":"/s","enabled":false},` +
+		`{"name":"乙","base":"http://192.0.2.22:2","path":"/files","enabled":true}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("保存失败：%d %s", rr.Code, rr.Body.String())
+	}
+
+	if _, ok := reg.at(0); !ok {
+		t.Fatal("应剩一个启用中的引擎")
+	}
+	if rt, _ := reg.at(0); rt.eng.Name != "乙" {
+		t.Errorf("运行时第一个引擎应为「乙」，实际 %q", rt.eng.Name)
+	}
+	if _, ok := reg.at(1); ok {
+		t.Error("停用的引擎不应占位")
+	}
+	// 配置里仍然是两个（停用的那个要留着，方便以后打开）
+	cur, _ := st.snapshot()
+	if len(cur.Engines) != 2 {
+		t.Errorf("配置里应保留 2 个引擎，实际 %d 个", len(cur.Engines))
+	}
+
+	var got configPayload
+	_ = json.Unmarshal(rr.Body.Bytes(), &got)
+	if got.Engines[0].Enabled || got.Engines[0].ProxyPort != 0 {
+		t.Errorf("停用的引擎下发时应带 enabled=false 且无端口：%+v", got.Engines[0])
+	}
+	if !got.Engines[1].Enabled || got.Engines[1].ProxyPort != 18898 {
+		t.Errorf("启用的引擎应接上第一个端口：%+v", got.Engines[1])
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 隐藏站点外壳的注入
 // ---------------------------------------------------------------------------
 

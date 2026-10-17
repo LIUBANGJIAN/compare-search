@@ -139,6 +139,7 @@
             directLink: d.getElementById('directLink'),
             engineList: d.getElementById('engineList'),
             addEngineBtn: d.getElementById('addEngineBtn'),
+            enginesSummary: d.getElementById('enginesSummary'),
             settingsHint: d.getElementById('settingsHint'),
             settingsSave: d.getElementById('settingsSave'),
             settingsCancel: d.getElementById('settingsCancel')
@@ -178,6 +179,7 @@
             index: -1,
             viewed: Object.create(null),
             engines: boot.engines.slice(),
+            activeEngines: [],
             hidePresets: boot.hidePresets.slice(),
             origin: boot.origin,
             maxEngines: boot.maxEngines || 8
@@ -211,21 +213,34 @@
             state.viewed = Object.create(null);
         }
 
-        // ---------------- 结果面板（每个引擎一个，含两个槽位） ----------------
+        // ---------------- 结果面板（只渲染启用的引擎） ----------------
         var slots = [];
+
+        // 启用的引擎；老数据里没有 enabled 字段，按启用处理
+        function enabledEngines() {
+            var out = [];
+            (state.engines || []).forEach(function (e) {
+                if (e && e.enabled !== false) out.push(e);
+            });
+            return out;
+        }
 
         function buildEnginePanels() {
             // 原地清空而不是重新赋值：这样外部持有的 slots 引用（state.slots）不会失效
             slots.length = 0;
+            state.activeEngines = enabledEngines();
             els.resultsCol.textContent = '';
-            if (state.engines.length === 0) {
+
+            if (state.activeEngines.length === 0) {
                 var tip = d.createElement('div');
                 tip.classList.add('list-empty');
-                tip.textContent = '还没有配置搜索引擎。点右上角「设置」添加。';
+                tip.textContent = state.engines.length === 0
+                    ? '还没有配置搜索引擎。点右上角「设置」添加。'
+                    : '所有搜索引擎都被停用了。点右上角「设置」，把要用的那个打开。';
                 els.resultsCol.appendChild(tip);
                 return;
             }
-            state.engines.forEach(function (eng, i) {
+            state.activeEngines.forEach(function (eng, i) {
                 var panel = d.createElement('div');
                 panel.classList.add('panel');
 
@@ -280,7 +295,7 @@
         // 呈现第 i 个番号：能命中预取就切槽位（瞬时），否则当场加载
         function present(i) {
             var keyword = state.items[i];
-            state.engines.forEach(function (eng, ei) {
+            (state.activeEngines || []).forEach(function (eng, ei) {
                 var slot = slots[ei];
                 if (!slot) return;
                 var url = engineUrl(eng, keyword, proto, hostname);
@@ -306,7 +321,7 @@
         function prefetch(i) {
             if (i < 0 || i >= state.items.length) return;
             var keyword = state.items[i];
-            state.engines.forEach(function (eng, ei) {
+            (state.activeEngines || []).forEach(function (eng, ei) {
                 var slot = slots[ei];
                 if (!slot) return;
                 var other = 1 - slot.active;
@@ -557,6 +572,10 @@
             els.addEngineBtn.textContent = full
                 ? ('已达上限（' + state.maxEngines + ' 个）')
                 : '+ 新增搜索引擎';
+
+            var on = 0;
+            editorRows.forEach(function (r) { if (r.enabled !== false) on++; });
+            els.enginesSummary.textContent = '已启用 ' + on + ' / ' + editorRows.length + ' 个';
         }
 
         function makeField(labelText, value, cls, placeholder) {
@@ -592,14 +611,34 @@
                     name: eng.name || '',
                     base: eng.base || '',
                     path: eng.path || '',
-                    css: eng.hideCss || ''
+                    css: eng.hideCss || '',
+                    enabled: eng.enabled !== false
                 };
 
                 var row = d.createElement('div');
                 row.classList.add('engine-row');
+                if (!rec.enabled) row.classList.add('is-off');
 
                 var head = d.createElement('div');
                 head.classList.add('row-head');
+
+                // 启用开关：关掉的引擎不分配代理端口、不出结果面板
+                var toggleWrap = d.createElement('label');
+                toggleWrap.classList.add('switch');
+                toggleWrap.setAttribute('title', '关掉后这个引擎暂时不参与检索');
+                var toggle = d.createElement('input');
+                toggle.setAttribute('type', 'checkbox');
+                toggle.classList.add('eng-enabled');
+                toggle.checked = rec.enabled;
+                var track = d.createElement('span');
+                track.classList.add('switch-track');
+                toggle.addEventListener('change', function () {
+                    rec.enabled = !!toggle.checked;
+                    row.classList.toggle('is-off', !rec.enabled);
+                    updateAddButton();
+                });
+                toggleWrap.appendChild(toggle);
+                toggleWrap.appendChild(track);
 
                 var fName = makeField('名称', rec.name, 'f-name', '例如 资源搜索');
                 var fBase = makeField('地址', rec.base, 'f-base', 'http://192.0.2.20:8787');
@@ -616,6 +655,7 @@
                     renderEditor(editorRows);
                 });
 
+                head.appendChild(toggleWrap);
                 head.appendChild(fName.wrap);
                 head.appendChild(fBase.wrap);
                 head.appendChild(fPath.wrap);
@@ -666,7 +706,10 @@
                 row.appendChild(details);
                 els.engineList.appendChild(row);
 
-                rec.nodes = { name: fName.input, base: fBase.input, path: fPath.input, css: cssInput };
+                rec.nodes = {
+                    name: fName.input, base: fBase.input, path: fPath.input,
+                    css: cssInput, enabled: toggle
+                };
                 editorRows.push(rec);
             });
 
@@ -680,13 +723,19 @@
                 rec.base = String(rec.nodes.base.value || '').trim();
                 rec.path = String(rec.nodes.path.value || '').trim();
                 rec.css = String(rec.nodes.css.value || '').trim();
+                rec.enabled = !!rec.nodes.enabled.checked;
             });
         }
 
         function collectEngines() {
             syncEditor();
             return editorRows.map(function (rec) {
-                var e = { name: rec.name, base: rec.base, path: rec.path };
+                var e = {
+                    name: rec.name,
+                    base: rec.base,
+                    path: rec.path,
+                    enabled: rec.enabled !== false
+                };
                 if (rec.css) e.hideCss = rec.css;
                 return e;
             });

@@ -296,7 +296,7 @@ const BOOT_ITEMS = ['ABP-123', 'SSIS-001', 'IPX-777'];
 const ALL_IDS = ['resultsCol', 'kwInput', 'searchBtn', 'settingsBtn', 'prevBtn', 'nextBtn',
     'pager', 'pagerInfo', 'clearBtn', 'listBox', 'codesCount', 'miniPrev', 'miniNext',
     'codesToggle', 'layout', 'splitter', 'settingsDialog', 'directLink', 'engineList',
-    'addEngineBtn', 'settingsHint', 'settingsSave', 'settingsCancel', 'bootstrap'];
+    'addEngineBtn', 'enginesSummary', 'settingsHint', 'settingsSave', 'settingsCancel', 'bootstrap'];
 
 function buildDoc(boot, ids) {
     ids.pager.hidden = true;
@@ -341,9 +341,9 @@ global.window.fetch = (url, opts) => {
         ok: true,
         json: () => Promise.resolve({
             engines: [
-                { name: '引擎A', base: 'http://192.0.2.41:1', path: '/s', proxyPort: 18898 },
-                { name: '引擎B', base: 'http://192.0.2.42:2', path: '/s', proxyPort: 18897 },
-                { name: '引擎C', base: 'http://192.0.2.43:3', path: '/s', proxyPort: 18896 }
+                { name: '引擎A', base: 'http://192.0.2.41:1', path: '/s', enabled: true, proxyPort: 18898 },
+                { name: '引擎B', base: 'http://192.0.2.42:2', path: '/s', enabled: false, proxyPort: 0 },
+                { name: '引擎C', base: 'http://192.0.2.43:3', path: '/s', enabled: true, proxyPort: 18897 }
             ],
             origin: '配置文件（页面保存）',
             maxEngines: 8
@@ -578,7 +578,37 @@ ok('清空会复位列表与所有引擎的 iframe', () => {
         eq(byId.engineList.findAll('engine-row').length, before - 1);
     });
 
+    await okAsync('每个引擎都有启用开关，关掉后该行变淡并更新计数', async () => {
+        const rows = byId.engineList.findAll('engine-row');
+        const sw = rows[0].findAll('eng-enabled')[0];
+        truthy(sw, '每行都应有启用开关');
+        eq(sw.checked, true, '默认应为启用');
+
+        const m = /已启用 (\d+) \/ (\d+)/.exec(byId.enginesSummary.textContent || '');
+        truthy(m, '摘要里应显示启用计数，实际：' + byId.enginesSummary.textContent);
+        const on = parseInt(m[1], 10);
+        const total = parseInt(m[2], 10);
+        eq(on, total, '刚打开设置时应当全部启用');
+        eq(total, rows.length, '总数应与编辑行数一致');
+
+        sw.checked = false;
+        sw.fire('change');
+        truthy(rows[0].classList.contains('is-off'), '关掉后该行应加 is-off 样式');
+        includes(byId.enginesSummary.textContent, '已启用 ' + (on - 1) + ' / ' + total);
+
+        sw.checked = true;
+        sw.fire('change');
+        eq(rows[0].classList.contains('is-off'), false, '重新打开后应恢复');
+        includes(byId.enginesSummary.textContent, '已启用 ' + on + ' / ' + total);
+    });
+
     await okAsync('保存时把当前编辑内容 POST 给 /api/config', async () => {
+        // 先把第一个关掉，验证开关状态确实进了请求体
+        const rows = byId.engineList.findAll('engine-row');
+        const sw = rows[0].findAll('eng-enabled')[0];
+        sw.checked = false;
+        sw.fire('change');
+
         fetched.length = 0;
         const expectCount = byId.engineList.findAll('engine-row').length;
         byId.settingsSave.fire('click');
@@ -587,18 +617,20 @@ ok('清空会复位列表与所有引擎的 iframe', () => {
         const body = JSON.parse(fetched[0].opts.body);
         eq(body.engines.length, expectCount);
         eq(body.engines[0].name, '115 Lite Web');
+        eq(body.engines[0].enabled, false, '关掉的引擎应带上 enabled=false');
         eq(body.engines[0].base, 'http://192.0.2.20:11510');
         eq(body.engines[0].path, '/files');
         await flush();
     });
 
-    await okAsync('保存成功后按新引擎重建结果面板', async () => {
+    await okAsync('保存成功后按新引擎重建结果面板（停用的不参与）', async () => {
         await flush();
         includes(byId.settingsHint.textContent, '已保存并生效');
         truthy(byId.settingsHint.classList.contains('ok'), '应显示成功样式');
         const names = byId.resultsCol.findAll('eng-name').map((n) => n.textContent);
-        eq(names, ['引擎A', '引擎B', '引擎C']);
-        eq(state.slots.length, 3);
+        eq(names, ['引擎A', '引擎C'], '停用的引擎不应生成结果面板');
+        eq(state.slots.length, 2);
+        eq(state.activeEngines.length, 2);
     });
 
     await okAsync('保存失败时把后端返回的错误原样显示出来', async () => {

@@ -226,7 +226,7 @@ PAGE="$(cat "$WORKDIR/page.html")"
 
 for id in kwInput searchBtn settingsBtn pager pagerInfo prevBtn nextBtn \
     miniPrev miniNext clearBtn listBox codesToggle splitter settingsDialog \
-    directLink engineList addEngineBtn resultsCol; do
+    directLink engineList addEngineBtn enginesSummary resultsCol; do
     case "$PAGE" in
         *"id=\"$id\""*) pass "面板页含 #$id" ;;
         *) fail "面板页缺少 #$id" ;;
@@ -490,6 +490,58 @@ CFG_TEXT="$(read_config_file)"
 case "$CFG_TEXT" in
     *"$SRC2_BASE"*) pass "配置已落盘，重启后仍生效（持久化）" ;;
     *) fail "配置文件未落盘或内容不正确（实际：$(printf '%s' "$CFG_TEXT" | head -c 200)）" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 引擎的启用 / 停用开关
+# ---------------------------------------------------------------------------
+note "启用 / 停用开关"
+
+case "$PAGE" in
+    *'id="enginesSummary"'*) pass "设置里有「已启用 N 个」计数" ;;
+    *) fail "设置里缺少启用计数" ;;
+esac
+case "$PAGE" in
+    *'switch-track'*) pass "每个引擎都带启用开关" ;;
+    *) fail "设置里没有启用开关" ;;
+esac
+case "$PAGE" in
+    *'"enabled"'*) pass "下发的引擎数据里带启用状态" ;;
+    *) fail "引擎数据里没有启用状态字段" ;;
+esac
+
+# 停用中间那个（第 2 个），验证：运行时少一个、后面的引擎接上前面的端口
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+    -H 'Content-Type: application/json' \
+    -d "{\"engines\":[{\"name\":\"$E1_NAME\",\"base\":\"$SRC2_BASE\",\"path\":\"/files\",\"enabled\":true},{\"name\":\"$E2_NAME\",\"base\":\"$SRC2_BASE\",\"path\":\"/s\",\"enabled\":false},{\"name\":\"新增引擎\",\"base\":\"$SRC1_BASE\",\"path\":\"/s\",\"enabled\":true}]}" \
+    "$PANEL/api/config")"
+if [ "$CODE" = "200" ]; then
+    pass "可以通过开关停用某个引擎（200）"
+else
+    fail "停用引擎失败（实际 HTTP $CODE）"
+fi
+
+HEALTH4="$(curl -s --max-time 5 "$PANEL/healthz")"
+if [ "$(json_field "$HEALTH4" "len(d['engines'])")" = "2" ]; then
+    pass "停用后运行时只剩 2 个引擎"
+else
+    fail "停用后运行时引擎数不对（实际 $(json_field "$HEALTH4" "len(d['engines'])") 个）"
+fi
+if [ "$(json_field "$HEALTH4" "d['engines'][1]['proxyPort']")" = "$((PROXY_PORT_BASE - 1))" ]; then
+    pass "停用中间那个后，后面的引擎接上了下一个端口"
+else
+    fail "停用后端口没有顺延（实际 $(json_field "$HEALTH4" "d['engines'][1]['proxyPort']")）"
+fi
+# 配置里仍保留 3 个（停用的那个要留着，方便以后打开）
+CFG2="$(curl -s --max-time 5 "$PANEL/api/config")"
+if [ "$(json_field "$CFG2" "len(d['engines'])")" = "3" ]; then
+    pass "配置里仍保留 3 个引擎（停用的不删掉）"
+else
+    fail "停用变成了删除（实际配置里 $(json_field "$CFG2" "len(d['engines'])") 个）"
+fi
+case "$(read_config_file)" in
+    *'"enabled": false'*) pass "停用状态已落盘" ;;
+    *) fail "停用状态没有写进配置文件" ;;
 esac
 
 # ---------------------------------------------------------------------------

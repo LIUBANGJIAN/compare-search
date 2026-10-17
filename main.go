@@ -179,7 +179,11 @@ func main() {
 	fmt.Printf("  引擎代理端口：%d 起（共预留 %d 个）\n", dep.ProxyPortBase, maxEngines)
 	fmt.Println("  ── 搜索引擎 ──")
 	for i, e := range cur.Engines {
-		fmt.Printf("    %d) %-16s %s%s\n", i+1, e.Name, e.Base, e.Path)
+		mark := "   "
+		if !e.isEnabled() {
+			mark = "停 "
+		}
+		fmt.Printf("    %d) %s%-16s %s%s\n", i+1, mark, e.Name, e.Base, e.Path)
 	}
 	fmt.Println("  引擎列表可在页面「设置」里增删改，保存后立即生效")
 	fmt.Println("  按 Enter 键停止服务并退出")
@@ -487,17 +491,9 @@ func startServers(dep deployment, store *settingsStore, items []string) (string,
 			return
 		}
 		s, orig := store.snapshot()
-		payload := make([]enginePayload, 0, len(s.Engines))
-		runtimes := reg.snapshot()
-		for i, e := range s.Engines {
-			port := 0
-			if i < len(runtimes) {
-				port = runtimes[i].port
-			}
-			payload = append(payload, enginePayload{
-				Name: e.Name, Base: e.Base, Path: e.Path, HideCSS: e.HideCSS, ProxyPort: port,
-			})
-		}
+		// 面板页要把**全部**引擎下发给前端：设置对话框要能显示停用的那些；
+		// 停用的引擎 proxyPort 为 0，前端据此只渲染启用的结果面板。
+		payload := enginePayloads(s.Engines, reg.snapshot())
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = io.WriteString(w, buildPage(pageData{

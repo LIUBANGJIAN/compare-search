@@ -26,7 +26,13 @@ type engine struct {
 	Base    string `json:"base"`              // 上游基地址，如 http://nas.local:8787
 	Path    string `json:"path"`              // 搜索路径，如 /s；查询串由程序追加
 	HideCSS string `json:"hideCss,omitempty"` // 可选：隐藏该站点自身外壳的 CSS
+	// Enabled 用指针是为了区分「没写」和「显式 false」：
+	// 老配置文件里没有这个字段，缺省必须当成启用。
+	Enabled *bool `json:"enabled,omitempty"`
 }
+
+// isEnabled 判断引擎是否启用；字段缺省视为启用（向后兼容）。
+func (e engine) isEnabled() bool { return e.Enabled == nil || *e.Enabled }
 
 // settings 是「可以在页面上修改、并且需要持久化」的那部分配置。
 // 部署参数（端口、监听地址、数据目录）不在这里 —— 那些只认环境变量。
@@ -205,6 +211,7 @@ func normalizeEngine(e engine, index int) (engine, error) {
 		Base:    base,
 		Path:    path,
 		HideCSS: strings.TrimSpace(e.HideCSS),
+		Enabled: e.Enabled,
 	}, nil
 }
 
@@ -302,20 +309,26 @@ func (r *engineRegistry) snapshot() []engineRuntime {
 }
 
 // apply 用新配置重建列表，端口从启动时确定的端口池里取。
+// 停用的引擎不占运行时资源（不分配端口、不出结果面板），重新启用后自动回来。
 func (r *engineRegistry) apply(list []engine) error {
 	items := make([]engineRuntime, 0, len(list))
+	used := 0
 	for i, e := range list {
 		if _, err := url.Parse(e.Base); err != nil {
 			return fmt.Errorf("第 %d 个引擎地址无法解析：%w", i+1, err)
 		}
+		if !e.isEnabled() {
+			continue
+		}
 		port := 0
-		if i < len(r.ports) {
-			port = r.ports[i]
+		if used < len(r.ports) {
+			port = r.ports[used]
 		}
 		if port == 0 {
 			return fmt.Errorf("第 %d 个引擎没有可用的代理端口（端口池只有 %d 个）", i+1, len(r.ports))
 		}
 		items = append(items, engineRuntime{eng: e, port: port})
+		used++
 	}
 	r.mu.Lock()
 	r.items = items
@@ -332,6 +345,7 @@ type enginePayload struct {
 	Base      string `json:"base"`
 	Path      string `json:"path"`
 	HideCSS   string `json:"hideCss,omitempty"`
+	Enabled   bool   `json:"enabled"`
 	ProxyPort int    `json:"proxyPort"`
 }
 
@@ -344,23 +358,30 @@ type configPayload struct {
 	ProxyPortBase int             `json:"proxyPortBase"`
 }
 
-func buildConfigPayload(store *settingsStore, reg *engineRegistry, dep deployment, itemCount int) configPayload {
-	cur, orig := store.snapshot()
-	runtimes := reg.snapshot()
-
-	byName := runtimes
-	list := make([]enginePayload, 0, len(cur.Engines))
-	for i, e := range cur.Engines {
+// enginePayloads 把「配置里的引擎」与「运行时的引擎」对应起来。
+// 运行时的列表只包含启用的引擎，所以这里要用一个游标按顺序取端口，
+// 不能直接用下标（否则停用掉中间一个之后，后面的端口全错位）。
+func enginePayloads(list []engine, runtimes []engineRuntime) []enginePayload {
+	out := make([]enginePayload, 0, len(list))
+	cur := 0
+	for _, e := range list {
 		port := 0
-		if i < len(byName) {
-			port = byName[i].port
+		if e.isEnabled() && cur < len(runtimes) {
+			port = runtimes[cur].port
+			cur++
 		}
-		list = append(list, enginePayload{
-			Name: e.Name, Base: e.Base, Path: e.Path, HideCSS: e.HideCSS, ProxyPort: port,
+		out = append(out, enginePayload{
+			Name: e.Name, Base: e.Base, Path: e.Path,
+			HideCSS: e.HideCSS, Enabled: e.isEnabled(), ProxyPort: port,
 		})
 	}
+	return out
+}
+
+func buildConfigPayload(store *settingsStore, reg *engineRegistry, dep deployment, itemCount int) configPayload {
+	cur, orig := store.snapshot()
 	return configPayload{
-		Engines:       list,
+		Engines:       enginePayloads(cur.Engines, reg.snapshot()),
 		Origin:        string(orig),
 		ConfigFile:    store.pathOf(),
 		Items:         itemCount,
