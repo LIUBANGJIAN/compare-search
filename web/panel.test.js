@@ -295,8 +295,9 @@ const ENGINES_BOOT = [
 const BOOT_ITEMS = ['ABP-123', 'SSIS-001', 'IPX-777'];
 const ALL_IDS = ['resultsCol', 'kwInput', 'searchBtn', 'settingsBtn', 'prevBtn', 'nextBtn',
     'pager', 'pagerInfo', 'clearBtn', 'listBox', 'codesCount', 'miniPrev', 'miniNext',
-    'codesToggle', 'layout', 'splitter', 'settingsDialog', 'directLink', 'engineList',
-    'addEngineBtn', 'enginesSummary', 'settingsHint', 'settingsSave', 'settingsCancel', 'bootstrap'];
+    'codesToggle', 'layout', 'splitter', 'settingsDialog', 'appVersion', 'directLink',
+    'engineList', 'addEngineBtn', 'enginesSummary', 'settingsHint', 'settingsSave',
+    'settingsCancel', 'bootstrap'];
 
 function buildDoc(boot, ids) {
     ids.pager.hidden = true;
@@ -349,6 +350,23 @@ global.window.fetch = (url, opts) => {
             maxEngines: 8
         })
     });
+};
+
+// 用一套全新的 DOM 跑一次 init，用来模拟「刷新页面」
+function freshInit(boot) {
+    const ids = {};
+    ALL_IDS.forEach((id) => { ids[id] = makeEl(id); });
+    buildDoc(boot, ids);
+    const saved = global.document.getElementById;
+    global.document.getElementById = (id) => ids[id] || null;
+    const st = api.init();
+    global.document.getElementById = saved;
+    return { ids, st };
+}
+
+const BOOT_BASE = {
+    items: [], engines: ENGINES_BOOT, hidePresets: HIDE_PRESETS,
+    origin: '配置文件（页面保存）', version: 'test', q: '', maxEngines: 8
 };
 
 const state = api.init();
@@ -511,10 +529,22 @@ ok('迷你翻页按钮与主按钮的禁用状态保持一致', () => {
     eq(byId.miniPrev.disabled, false);
 });
 
-ok('清空会复位列表与所有引擎的 iframe', () => {
+ok('「清空」需要点两次：第一次只进入确认态', () => {
+    const before = byId.codesCount.textContent;
+    truthy(before !== '0', '此时应还有番号');
+    byId.clearBtn.fire('click');
+    eq(byId.codesCount.textContent, before, '第一次点击不应清空');
+    eq(byId.clearBtn.textContent, '确定清空？');
+    truthy(byId.clearBtn.classList.contains('armed'), '应进入确认态');
+});
+
+ok('第二次点击才真正清空，并复位 iframe 与输入框', () => {
     byId.clearBtn.fire('click');
     eq(byId.codesCount.textContent, '0');
     eq(byId.pager.hidden, true);
+    eq(byId.clearBtn.textContent, '清空');
+    eq(byId.clearBtn.classList.contains('armed'), false);
+    eq(byId.kwInput.value, '', '清空应把输入框也清掉');
     state.slots.forEach((s) => {
         s.frames.forEach((f) => eq(f.src, 'about:blank'));
     });
@@ -531,6 +561,10 @@ ok('清空会复位列表与所有引擎的 iframe', () => {
         byId.settingsBtn.fire('click');
         eq(byId.engineList.findAll('engine-row').length, 2);
         includes(byId.settingsHint.textContent, '内置默认值');
+    });
+
+    await okAsync('设置里显示版本号', async () => {
+        eq(byId.appVersion.textContent, 'vtest', '应显示 v + 服务端自报的版本');
     });
 
     await okAsync('设置里显示「这个网站带关键字」的直达地址', async () => {
@@ -680,6 +714,62 @@ ok('清空会复位列表与所有引擎的 iframe', () => {
         eq(freshIds.pagerInfo.textContent, '1 / 1');
         eq(freshState.slots[0].frames[0].src, 'http://127.0.0.1:18898/files?q=ABP-999');
         eq(freshState.slots[1].frames[0].src, 'http://127.0.0.1:18897/s?q=ABP-999');
+    });
+
+    // ---------------------------------------------------------------------
+    // 五、刷新页面不丢关键字
+    // ---------------------------------------------------------------------
+
+    console.log('== DOM 行为：刷新页面不丢内容');
+
+    await okAsync('刷新后输入框、番号列表、当前查看的那条都还原', async () => {
+        Object.keys(localStore).forEach((k) => delete localStore[k]);
+
+        // 第一次打开：输入 3 个番号、检索、并点到第 2 条
+        const first = freshInit(BOOT_BASE);
+        first.ids.kwInput.value = 'ABP-1\nSSIS-2\nIPX-3';
+        first.ids.searchBtn.fire('click');
+        eq(first.ids.codesCount.textContent, '3');
+        first.ids.listBox.querySelectorAll('.data-line')[1].fire('click');
+        eq(first.ids.pagerInfo.textContent, '2 / 3');
+
+        // 模拟刷新：重新 init（localStorage 保留）
+        const second = freshInit(BOOT_BASE);
+        eq(second.ids.kwInput.value, 'ABP-1\nSSIS-2\nIPX-3', '刷新后输入框应还原');
+        eq(second.ids.codesCount.textContent, '3', '刷新后番号列表应还原');
+        eq(second.ids.pagerInfo.textContent, '2 / 3', '刷新后应回到上次查看的那条');
+        eq(second.st.slots[0].frames[second.st.slots[0].active].src,
+            'http://127.0.0.1:18898/files?q=SSIS-2', '还原后应直接呈现该条结果');
+    });
+
+    await okAsync('换了番号来源（比如换了 txt 文件）时旧草稿作废', async () => {
+        Object.keys(localStore).forEach((k) => delete localStore[k]);
+        const bootA = Object.assign({}, BOOT_BASE, { items: ['FROM-TXT-1'] });
+
+        const a = freshInit(bootA);
+        a.ids.kwInput.value = '手输的关键字';
+        a.ids.searchBtn.fire('click');
+
+        // 同一来源：草稿应还原
+        const b = freshInit(bootA);
+        eq(b.ids.kwInput.value, '手输的关键字');
+
+        // 换了来源：应回落到新文件的内容，而不是把旧草稿盖上去
+        const bootB = Object.assign({}, BOOT_BASE, { items: ['NEW-1', 'NEW-2'] });
+        const c = freshInit(bootB);
+        eq(c.ids.kwInput.value, 'NEW-1\nNEW-2', '来源变了应使用新文件内容');
+        eq(c.ids.codesCount.textContent, '2');
+    });
+
+    await okAsync('URL 带关键字时优先用 URL，不受草稿影响', async () => {
+        Object.keys(localStore).forEach((k) => delete localStore[k]);
+        const a = freshInit(BOOT_BASE);
+        a.ids.kwInput.value = '草稿内容';
+        a.ids.searchBtn.fire('click');
+
+        const b = freshInit(Object.assign({}, BOOT_BASE, { q: 'FROM-URL' }));
+        eq(b.ids.kwInput.value, 'FROM-URL');
+        eq(b.ids.codesCount.textContent, '1');
     });
 
     console.log('\n共 ' + checks + ' 项断言，失败 ' + fails + ' 项');

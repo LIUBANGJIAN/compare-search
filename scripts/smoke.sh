@@ -226,7 +226,7 @@ PAGE="$(cat "$WORKDIR/page.html")"
 
 for id in kwInput searchBtn settingsBtn pager pagerInfo prevBtn nextBtn \
     miniPrev miniNext clearBtn listBox codesToggle splitter settingsDialog \
-    directLink engineList addEngineBtn enginesSummary resultsCol; do
+    appVersion directLink engineList addEngineBtn enginesSummary resultsCol; do
     case "$PAGE" in
         *"id=\"$id\""*) pass "面板页含 #$id" ;;
         *) fail "面板页缺少 #$id" ;;
@@ -257,6 +257,26 @@ esac
 case "$PAGE" in
     *'"key":"common"'*) pass "预设立即包含「通用」方案" ;;
     *) fail "预设里缺少通用方案" ;;
+esac
+# 「清空」要在「检索」旁边（搜索栏里），而不是番号栏里
+if printf '%s' "$PAGE" | "$PY" -c "
+import sys
+h = sys.stdin.read()
+i = h.find('id=\"clearBtn\"')
+j = h.find('class=\"codes-col\"')
+sys.exit(0 if (i >= 0 and j >= 0 and i < j) else 1)
+"; then
+    pass "「清空」按钮在搜索栏里（检索旁边）"
+else
+    fail "「清空」按钮不在搜索栏里"
+fi
+case "$PAGE" in
+    *'btn-clear'*) pass "「清空」带两段式确认样式" ;;
+    *) fail "「清空」缺少确认态样式" ;;
+esac
+case "$PAGE" in
+    *'"version":"'"$VER"'"'*) pass "面板页下发了版本号 $VER（设置里显示）" ;;
+    *) fail "面板页未下发版本号" ;;
 esac
 if [ -n "$E1_NAME" ]; then
     case "$PAGE" in

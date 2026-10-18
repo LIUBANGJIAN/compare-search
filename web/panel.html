@@ -224,20 +224,16 @@
             flex: 0 0 auto;
         }
         .codes-header .count { color: #94a3b8; font-weight: 400; }
-        .clear-btn {
-            padding: 3px 8px;
-            font: inherit;
-            font-size: 0.75rem;
-            font-weight: 400;
-            color: #334155;
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            border-radius: 6px;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            white-space: nowrap;
+
+        /* 清空按钮：第一次点进入「确认」态，第二次点才真的清空 */
+        .btn-clear:hover:not(:disabled) { border-color: #dc2626; color: #dc2626; background: #fef2f2; }
+        .btn-clear.armed {
+            color: #fff;
+            background: #dc2626;
+            border-color: #dc2626;
+            font-weight: 600;
         }
-        .clear-btn:hover { background: #ebf5ff; border-color: #0066cc; color: #0066cc; }
+        .btn-clear.armed:hover { background: #b91c1c; border-color: #b91c1c; color: #fff; }
         .list-box {
             flex: 1 1 auto;
             min-height: 0;
@@ -338,6 +334,13 @@
         dialog.settings::backdrop { background: rgba(15, 23, 42, 0.35); }
         dialog.settings .body { display: flex; flex-direction: column; max-height: 86vh; padding: 20px 22px 16px; }
         dialog.settings h2 { margin: 0 0 4px; font-size: 1rem; font-weight: 600; }
+        dialog.settings h2 .ver {
+            margin-left: 8px;
+            font-size: 0.72rem;
+            font-weight: 400;
+            color: #94a3b8;
+            font-variant-numeric: tabular-nums;
+        }
         dialog.settings .sub { margin: 0 0 14px; font-size: 0.8rem; color: #64748b; line-height: 1.6; }
         dialog.settings code { background: #f1f5f9; padding: 1px 5px; border-radius: 4px; font-size: 0.78rem; }
         .direct-box {
@@ -508,6 +511,7 @@
             <textarea id="kwInput" spellcheck="false"
                 placeholder="一行一个番号；可一次粘贴多个，用换行分隔（也支持逗号 / 分号）。点「检索」后右侧会列出全部番号，点任意一条即可看它的结果。快捷键 Ctrl+Enter 检索，Alt+← / Alt+→ 翻页"></textarea>
             <button id="searchBtn" class="btn btn-primary" type="button">检索</button>
+            <button id="clearBtn" class="btn btn-clear" type="button" title="清空输入框与番号列表">清空</button>
             <button id="settingsBtn" class="btn" type="button">设置</button>
         </div>
 
@@ -519,7 +523,6 @@
             <div class="codes-col" id="codesCol">
                 <div class="codes-header">
                     <span>番号 <span class="count" id="codesCount">0</span></span>
-                    <span><button class="clear-btn" id="clearBtn" type="button">清空</button></span>
                 </div>
                 <div class="codes-pager" id="pager" hidden>
                     <button id="prevBtn" type="button" title="上一个（Alt+←）">‹</button>
@@ -539,7 +542,7 @@
 
     <dialog class="settings" id="settingsDialog">
         <div class="body">
-            <h2>搜索引擎设置</h2>
+            <h2>搜索引擎设置 <span class="ver" id="appVersion"></span></h2>
             <p class="sub">可添加任意多个搜索引擎。保存后立即生效并写入配置文件持久化。
                 搜索路径是引擎自己的检索地址，程序会自动在后面追加 <code>?q=关键字</code>。</p>
             <div class="direct-box">

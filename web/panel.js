@@ -136,6 +136,7 @@
             layout: d.getElementById('layout'),
             splitter: d.getElementById('splitter'),
             dialog: d.getElementById('settingsDialog'),
+            appVersion: d.getElementById('appVersion'),
             directLink: d.getElementById('directLink'),
             engineList: d.getElementById('engineList'),
             addEngineBtn: d.getElementById('addEngineBtn'),
@@ -199,6 +200,34 @@
                 localStorage.setItem(storageKey + key, value);
             } catch (e) {
                 /* 隐私模式下写失败可忽略 */
+            }
+        }
+
+        // ---------------- 草稿：刷新页面不丢关键字 ----------------
+        var DRAFT_KEY = '_draft';
+        var bootSrc = (boot.items || []).join('\n');
+
+        function saveDraft() {
+            writeStore(DRAFT_KEY, JSON.stringify({
+                text: els.kwInput.value,
+                src: bootSrc,
+                index: state.index
+            }));
+        }
+
+        // 草稿带上「番号来源」，换了 txt 文件时旧草稿自动作废，
+        // 否则会把新文件的内容盖掉 —— 那才是更难查的安静型故障。
+        function loadDraft() {
+            var raw = readStore(DRAFT_KEY, '');
+            if (!raw) return null;
+            try {
+                var dd = JSON.parse(raw);
+                if (!dd || typeof dd !== 'object') return null;
+                if (typeof dd.src !== 'string' || dd.src !== bootSrc) return null;
+                if (typeof dd.text !== 'string') return null;
+                return dd;
+            } catch (e) {
+                return null;
             }
         }
 
@@ -415,6 +444,9 @@
             // 迷你按钮与主按钮状态保持一致
             els.miniPrev.disabled = atStart;
             els.miniNext.disabled = atEnd;
+            // 没有番号时「清空」无从清起
+            els.clearBtn.disabled = total === 0;
+            if (total === 0) disarmClear();
         }
 
         // ---------------- 检索 ----------------
@@ -437,6 +469,7 @@
             refreshListState();
             renderPager();
             scrollCurrentIntoView();
+            saveDraft();
         }
 
         function step(direction) {
@@ -466,7 +499,9 @@
                 els.kwInput.focus();
                 return;
             }
+            disarmClear();
             setItems(list, true);
+            saveDraft();
         }
 
         // ---------------- 事件 ----------------
@@ -495,14 +530,51 @@
             }
         });
 
-        els.clearBtn.addEventListener('click', function () {
+        // ---------------- 清空（二次确认） ----------------
+        // 点一次进入「确定清空？」状态，4 秒内再点一次才真的清空；
+        // 超时自动复原，避免误触把辛苦攒的番号一次干掉。
+        var clearArmed = false;
+        var clearTimer = null;
+
+        function disarmClear() {
+            clearArmed = false;
+            els.clearBtn.textContent = '清空';
+            els.clearBtn.classList.remove('armed');
+            if (clearTimer) {
+                clearTimeout(clearTimer);
+                clearTimer = null;
+            }
+        }
+
+        function doClear() {
             state.items = [];
             state.index = -1;
             state.viewed = Object.create(null);
             writeStore('_viewed', '{}');
+            if (els.kwInput) els.kwInput.value = '';
+            writeStore(DRAFT_KEY, '');
             buildListNodes();
             renderPager();
             clearFrames();
+        }
+
+        els.clearBtn.addEventListener('click', function () {
+            if (!clearArmed) {
+                clearArmed = true;
+                els.clearBtn.textContent = '确定清空？';
+                els.clearBtn.classList.add('armed');
+                clearTimer = setTimeout(disarmClear, 4000);
+                return;
+            }
+            disarmClear();
+            doClear();
+        });
+
+        // 边打字边存草稿（防抖，别每敲一个字就写一次 localStorage）
+        var draftTimer = null;
+        els.kwInput.addEventListener('input', function () {
+            if (draftTimer) clearTimeout(draftTimer);
+            draftTimer = setTimeout(saveDraft, 300);
         });
 
         // ---------------- 番号栏宽度与收起 ----------------
@@ -808,13 +880,27 @@
 
         // ---------------- 初始状态 ----------------
         buildEnginePanels();
-        setItems(boot.items, false);
-        els.kwInput.value = boot.items.join('\n');
+        if (els.appVersion) {
+            els.appVersion.textContent = boot.version ? ('v' + boot.version) : '';
+        }
 
-        // 支持 /?q=关键字 直接检索（便于其它程序调用或做成浏览器书签）
         if (boot.q) {
+            // URL 带关键字优先级最高（对接方/浏览器书签的明确意图）
             els.kwInput.value = boot.q;
             submitSearch();
+        } else {
+            var draft = loadDraft();
+            if (draft && draft.text.trim() !== '') {
+                // 刷新页面：把上次的输入、番号列表、正在看的那条都还原回来
+                els.kwInput.value = draft.text;
+                var restored = splitKeywords(draft.text);
+                setItems(restored, false);
+                var di = (typeof draft.index === 'number') ? draft.index : -1;
+                if (di >= 0 && di < restored.length) runItem(di);
+            } else {
+                setItems(boot.items, false);
+                els.kwInput.value = boot.items.join('\n');
+            }
         }
 
         state.slots = slots;
