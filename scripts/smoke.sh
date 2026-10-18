@@ -10,7 +10,7 @@
 # 刻意不使用 set -e：需要跑完全部断言后一次性汇总（告诉你到底坏了几处），
 # 而不是第一条失败就退出。
 #
-# ⚠️ 不要写 `cmd | grep -q ...`：在 pipefail 下这是**会随机假失败**的写法 ——
+# ⚠️ 不要在管道后面接 grep -q：它在 pipefail 下**会随机假失败** ——
 # grep -q 一命中就退出，上游进程收到 SIGPIPE 返回非零，整条管道被判为失败。
 # 实测本机侥幸通过、容器里失败。所有内容匹配都先取到变量（或落文件）再比。
 set -uo pipefail
@@ -73,6 +73,16 @@ DRAFT_PATH="$(to_native "$WORKDIR/draft.json")"
 PY="$(command -v python3 || command -v python)"
 if [ -z "$PY" ]; then
     echo "::error title=缺少 python::冒烟脚本需要 python3 来启动假上游与解析 JSON"
+    exit 1
+fi
+
+# 脚本自检：禁止用管道接 grep -q。
+# grep -q 一命中就退出，上游进程收到 SIGPIPE 返回非零，pipefail 会把整条管道判为失败 ——
+# 这类错误是竞态，本机常常侥幸通过、容器里才红，排查成本很高。
+# 被禁的字符串必须拼接构造，否则这条 grep 会命中自己的脚本正文，闸门就永远红着。
+bad_pat=$(printf '%s %s' '|' 'grep -q')
+if grep -n -F -- "$bad_pat" "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
+    echo "::error title=冒烟脚本自检::脚本里出现了被禁的写法（管道接 grep -q），pipefail 下会随机假失败"
     exit 1
 fi
 
@@ -601,7 +611,12 @@ CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
     -H 'Content-Type: application/json' \
     -d '{"text":"","index":-1}' "$PANEL/api/draft")"
 DRAFT_PAGE2="$(curl -s --max-time 5 "$PANEL/")"
-if [ "$CODE" = "200" ] && printf '%s' "$DRAFT_PAGE2" | grep -q '"text":""'; then
+# 先取到变量再比 —— 不要把 grep -q 接在管道后面（pipefail 下会因 SIGPIPE 假失败）
+case "$DRAFT_PAGE2" in
+    *'"text":""'*) DRAFT_EMPTY=1 ;;
+    *) DRAFT_EMPTY=0 ;;
+esac
+if [ "$CODE" = "200" ] && [ "$DRAFT_EMPTY" = "1" ]; then
     pass "清空后草稿真的空了"
 else
     fail "清空草稿未生效（HTTP $CODE）"
