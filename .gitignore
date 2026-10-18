@@ -36,3 +36,4 @@ env.yaml
 
 # compose 默认的数据目录
 data/
+draft.json

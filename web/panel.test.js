@@ -717,59 +717,74 @@ ok('第二次点击才真正清空，并复位 iframe 与输入框', () => {
     });
 
     // ---------------------------------------------------------------------
-    // 五、刷新页面不丢关键字
+    // 五、关键字持久化（存服务端，关掉浏览器也还在）
     // ---------------------------------------------------------------------
 
-    console.log('== DOM 行为：刷新页面不丢内容');
+    console.log('== DOM 行为：关键字持久化');
 
-    await okAsync('刷新后输入框、番号列表、当前查看的那条都还原', async () => {
-        Object.keys(localStore).forEach((k) => delete localStore[k]);
-
-        // 第一次打开：输入 3 个番号、检索、并点到第 2 条
-        const first = freshInit(BOOT_BASE);
-        first.ids.kwInput.value = 'ABP-1\nSSIS-2\nIPX-3';
-        first.ids.searchBtn.fire('click');
-        eq(first.ids.codesCount.textContent, '3');
-        first.ids.listBox.querySelectorAll('.data-line')[1].fire('click');
-        eq(first.ids.pagerInfo.textContent, '2 / 3');
-
-        // 模拟刷新：重新 init（localStorage 保留）
-        const second = freshInit(BOOT_BASE);
-        eq(second.ids.kwInput.value, 'ABP-1\nSSIS-2\nIPX-3', '刷新后输入框应还原');
-        eq(second.ids.codesCount.textContent, '3', '刷新后番号列表应还原');
-        eq(second.ids.pagerInfo.textContent, '2 / 3', '刷新后应回到上次查看的那条');
-        eq(second.st.slots[0].frames[second.st.slots[0].active].src,
+    await okAsync('重新打开页面：输入、番号列表、当前查看的那条都还原', async () => {
+        const x = freshInit(Object.assign({}, BOOT_BASE, {
+            draft: { text: 'ABP-1\nSSIS-2\nIPX-3', index: 1, src: '' }
+        }));
+        eq(x.ids.kwInput.value, 'ABP-1\nSSIS-2\nIPX-3', '输入框应还原');
+        eq(x.ids.codesCount.textContent, '3', '番号列表应还原');
+        eq(x.ids.pagerInfo.textContent, '2 / 3', '应回到上次查看的那条');
+        eq(x.st.slots[0].frames[x.st.slots[0].active].src,
             'http://127.0.0.1:18898/files?q=SSIS-2', '还原后应直接呈现该条结果');
     });
 
-    await okAsync('换了番号来源（比如换了 txt 文件）时旧草稿作废', async () => {
-        Object.keys(localStore).forEach((k) => delete localStore[k]);
-        const bootA = Object.assign({}, BOOT_BASE, { items: ['FROM-TXT-1'] });
-
-        const a = freshInit(bootA);
-        a.ids.kwInput.value = '手输的关键字';
-        a.ids.searchBtn.fire('click');
-
-        // 同一来源：草稿应还原
-        const b = freshInit(bootA);
-        eq(b.ids.kwInput.value, '手输的关键字');
-
-        // 换了来源：应回落到新文件的内容，而不是把旧草稿盖上去
-        const bootB = Object.assign({}, BOOT_BASE, { items: ['NEW-1', 'NEW-2'] });
-        const c = freshInit(bootB);
-        eq(c.ids.kwInput.value, 'NEW-1\nNEW-2', '来源变了应使用新文件内容');
-        eq(c.ids.codesCount.textContent, '2');
+    await okAsync('草稿来源不一致（换了 txt 文件）时不套用旧草稿', async () => {
+        const x = freshInit(Object.assign({}, BOOT_BASE, {
+            items: ['NEW-1', 'NEW-2'],
+            draft: { text: '旧草稿', index: 0, src: 'FROM-OLD-TXT' }
+        }));
+        eq(x.ids.kwInput.value, 'NEW-1\nNEW-2', '应使用新来源的内容');
+        eq(x.ids.codesCount.textContent, '2');
     });
 
     await okAsync('URL 带关键字时优先用 URL，不受草稿影响', async () => {
-        Object.keys(localStore).forEach((k) => delete localStore[k]);
-        const a = freshInit(BOOT_BASE);
-        a.ids.kwInput.value = '草稿内容';
-        a.ids.searchBtn.fire('click');
+        const x = freshInit(Object.assign({}, BOOT_BASE, {
+            q: 'FROM-URL',
+            draft: { text: '草稿内容', index: 0, src: '' }
+        }));
+        eq(x.ids.kwInput.value, 'FROM-URL');
+        eq(x.ids.codesCount.textContent, '1');
+    });
 
-        const b = freshInit(Object.assign({}, BOOT_BASE, { q: 'FROM-URL' }));
-        eq(b.ids.kwInput.value, 'FROM-URL');
-        eq(b.ids.codesCount.textContent, '1');
+    await okAsync('改动会 POST 到 /api/draft（防抖合并，不是每敲一下都发）', async () => {
+        global.window.fetch = (url, opts) => {
+            fetched.push({ url, opts });
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        };
+        // 用全新实例，避免前面那些实例残留的定时器混进来
+        const x = freshInit(BOOT_BASE);
+        fetched.length = 0;
+        const draftPosts = () => fetched.filter((f) => f.url === '/api/draft');
+
+        x.ids.kwInput.value = '草稿A';
+        x.ids.kwInput.fire('input', {});
+        x.ids.kwInput.fire('input', {});   // 连续两次输入应被合并
+        eq(draftPosts().length, 0, '防抖期内不应立刻发请求');
+
+        await new Promise((r) => setTimeout(r, 900));
+        const mine = draftPosts().filter((f) => JSON.parse(f.opts.body).text === '草稿A');
+        eq(mine.length, 1, '连续两次输入应合并成一次提交');
+        eq(typeof JSON.parse(mine[0].opts.body).src, 'string');
+    });
+
+    await okAsync('点「清空」会立刻把服务端草稿置空（不等防抖）', async () => {
+        byId.kwInput.value = 'ABP-9\nSSIS-9';
+        byId.searchBtn.fire('click');
+        fetched.length = 0;
+
+        byId.clearBtn.fire('click');   // 进入确认态
+        byId.clearBtn.fire('click');   // 真清空
+
+        const posts = fetched.filter((f) => f.url === '/api/draft');
+        eq(posts.length, 1, '清空应立即写一次');
+        const body = JSON.parse(posts[0].opts.body);
+        eq(body.text, '', '清空后服务端草稿应为空');
+        eq(body.index, -1);
     });
 
     console.log('\n共 ' + checks + ' 项断言，失败 ' + fails + ' 项');

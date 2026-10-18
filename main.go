@@ -111,6 +111,7 @@ type deployment struct {
 	ListenHost    string
 	CookieFile    string
 	ConfigFile    string
+	DraftFile     string
 }
 
 func main() {
@@ -176,6 +177,7 @@ func main() {
 	fmt.Printf("    其它程序只要拼这一个 URL 即可；也支持 ?keyword= / ?kw= 等写法\n")
 	fmt.Printf("  取直达地址的接口：%s/api/search?q=关键字\n", pageURL)
 	fmt.Printf("  配置文件：%s\n", store.pathOf())
+	fmt.Printf("  关键字草稿：%s（存服务端，换浏览器也不丢；只有点「清空」才清）\n", dep.DraftFile)
 	fmt.Printf("  引擎代理端口：%d 起（共预留 %d 个）\n", dep.ProxyPortBase, maxEngines)
 	fmt.Println("  ── 搜索引擎 ──")
 	for i, e := range cur.Engines {
@@ -209,7 +211,7 @@ func printBanner() {
 func checkDataDir(dep deployment) {
 	seen := map[string]bool{}
 	bad := false
-	for _, f := range []string{dep.ConfigFile, dep.CookieFile} {
+	for _, f := range []string{dep.ConfigFile, dep.CookieFile, dep.DraftFile} {
 		dir := filepath.Dir(f)
 		if seen[dir] {
 			continue
@@ -255,6 +257,7 @@ func loadDeployment() deployment {
 		ListenHost:    envOr("LISTEN_HOST", "127.0.0.1"),
 		CookieFile:    defaultDataFile("COOKIE_FILE", "cookie_115.txt"),
 		ConfigFile:    defaultDataFile("CONFIG_FILE", "settings.json"),
+		DraftFile:     defaultDataFile("DRAFT_FILE", "draft.json"),
 	}
 }
 
@@ -416,6 +419,7 @@ type pageData struct {
 	Items       []string        `json:"items"`
 	Engines     []enginePayload `json:"engines"`
 	HidePresets []hidePreset    `json:"hidePresets"`
+	Draft       draft           `json:"draft"`
 	Origin      string          `json:"origin"`
 	Version     string          `json:"version"`
 	Query       string          `json:"q"`
@@ -431,6 +435,7 @@ type pageData struct {
 func startServers(dep deployment, store *settingsStore, items []string) (string, error) {
 	cur, _ := store.snapshot()
 	jar := newCookieJar(dep.CookieFile)
+	drafts := newDraftStore(dep.DraftFile)
 	reg := &engineRegistry{}
 
 	ports := make([]int, 0, maxEngines)
@@ -479,6 +484,7 @@ func startServers(dep deployment, store *settingsStore, items []string) (string,
 	})
 	mux.HandleFunc("/api/config", makeConfigHandler(store, reg, dep, itemCount))
 	mux.HandleFunc("/api/search", makeSearchAPI(store, reg, itemCount))
+	mux.HandleFunc("/api/draft", makeDraftHandler(drafts))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// 面板页：根路径；另外 /search?q=xxx 也当面板页处理，
 		// 这样「这个网站的检索入口」不止一种拼法，对接方怎么写都能用。
@@ -500,6 +506,7 @@ func startServers(dep deployment, store *settingsStore, items []string) (string,
 			Items:       items,
 			Engines:     payload,
 			HidePresets: hidePresets(),
+			Draft:       drafts.snapshot(),
 			Origin:      string(orig),
 			Version:     version,
 			Query:       keyword,

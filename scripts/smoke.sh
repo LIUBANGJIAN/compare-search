@@ -68,6 +68,7 @@ to_native() {
 }
 COOKIE_PATH="$(to_native "$WORKDIR/cookie_115.txt")"
 CONFIG_PATH="$(to_native "$WORKDIR/settings.json")"
+DRAFT_PATH="$(to_native "$WORKDIR/draft.json")"
 
 PY="$(command -v python3 || command -v python)"
 if [ -z "$PY" ]; then
@@ -120,6 +121,7 @@ else
         PROXY_PORT_BASE="$PROXY_PORT_BASE" \
         COOKIE_FILE="$COOKIE_PATH" \
         CONFIG_FILE="$CONFIG_PATH" \
+        DRAFT_FILE="$DRAFT_PATH" \
         NO_BROWSER=1 \
         "$BIN" >"$WORKDIR/app.log" 2>&1 &
     APP_PID=$!
@@ -565,11 +567,61 @@ case "$(read_config_file)" in
 esac
 
 # ---------------------------------------------------------------------------
+# 关键字草稿：存在服务端，关掉浏览器也不会丢
+# ---------------------------------------------------------------------------
+note "关键字草稿"
+
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"text":"ABP-1\nSSIS-2","index":1}' \
+    "$PANEL/api/draft")"
+if [ "$CODE" = "200" ]; then
+    pass "可以把关键字草稿存到服务端"
+else
+    fail "保存草稿失败（实际 HTTP $CODE）"
+fi
+
+DRAFT_PAGE="$(curl -s --max-time 5 "$PANEL/")"
+case "$DRAFT_PAGE" in
+    *'"text":"ABP-1\nSSIS-2"'*)
+        pass "重新打开页面时草稿随页面下发（关掉浏览器也还在）" ;;
+    *) fail "页面未带上服务端草稿" ;;
+esac
+
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+    -H 'Content-Type: application/json' -H 'Origin: http://evil.example' \
+    -d '{"text":"evil"}' "$PANEL/api/draft")"
+if [ "$CODE" = "403" ]; then
+    pass "跨站写草稿被拒绝（403）"
+else
+    fail "跨站写草稿未被拒绝（实际 HTTP $CODE）"
+fi
+
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"text":"","index":-1}' "$PANEL/api/draft")"
+DRAFT_PAGE2="$(curl -s --max-time 5 "$PANEL/")"
+if [ "$CODE" = "200" ] && printf '%s' "$DRAFT_PAGE2" | grep -q '"text":""'; then
+    pass "清空后草稿真的空了"
+else
+    fail "清空草稿未生效（HTTP $CODE）"
+fi
+if [ "$ENGINE" = "docker" ]; then
+    DRAFT_FILE_BODY="$(docker exec "$CNAME" cat /data/draft.json 2>/dev/null)"
+else
+    DRAFT_FILE_BODY="$(cat "$WORKDIR/draft.json" 2>/dev/null)"
+fi
+case "$DRAFT_FILE_BODY" in
+    *'"text":""'*) pass "草稿已落盘（重启后仍生效）" ;;
+    *) fail "草稿未落盘（实际：$(printf '%s' "$DRAFT_FILE_BODY" | head -c 120)）" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 汇总
 # ---------------------------------------------------------------------------
 # 断言计数下限：不使用 set -e 的脚本，「半途没跑起来」与「全部通过」退出码都是 0，
-# 这条锁专堵那种空转的绿。取实际条数的一半左右并留富余，别贴着实际值。
-MIN_CHECKS=26
+# 这条锁专堵那种空转的绿。现在实际有 90 条左右，取下限 40 留足富余。
+MIN_CHECKS=40
 if [ "$CHECKS" -lt "$MIN_CHECKS" ]; then
     echo "::error title=断言数异常::只执行了 ${CHECKS} 条，低于下限 ${MIN_CHECKS}"
     exit 1

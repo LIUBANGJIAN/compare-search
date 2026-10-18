@@ -490,6 +490,140 @@ func TestConfigAPITogglesEngine(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 关键字草稿（存服务端）
+// ---------------------------------------------------------------------------
+
+func TestDraftStoreSaveLoadAndClear(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "draft.json")
+	st := newDraftStore(path)
+
+	// 文件不存在时应是空的，不报错
+	if got := st.snapshot(); got.Text != "" || got.Index != 0 {
+		t.Errorf("初始草稿应为空：%+v", got)
+	}
+
+	if err := st.save(draft{Text: "ABP-1\nSSIS-2", Index: 1, Src: "src-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("应当落盘：%v", err)
+	}
+
+	// 模拟重启
+	re := newDraftStore(path)
+	got := re.snapshot()
+	if got.Text != "ABP-1\nSSIS-2" || got.Index != 1 || got.Src != "src-a" {
+		t.Errorf("重启后读回不一致：%+v", got)
+	}
+
+	// 清空
+	if err := re.save(draft{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := newDraftStore(path).snapshot(); got.Text != "" || got.Index != 0 {
+		t.Errorf("清空后应回到空：%+v", got)
+	}
+}
+
+func TestDraftStoreIndexClampAndLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "draft.json")
+	st := newDraftStore(path)
+
+	if err := st.save(draft{Text: "x", Index: -99}); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.snapshot().Index; got != -1 {
+		t.Errorf("负索引应夹到 -1，实际 %d", got)
+	}
+
+	big := strings.Repeat("a", maxDraftBytes+1)
+	if err := st.save(draft{Text: big}); err == nil {
+		t.Error("超过上限的草稿应被拒绝")
+	}
+	if got := st.snapshot().Text; got == big {
+		t.Error("被拒绝的内容不应进入内存")
+	}
+}
+
+func TestDraftStoreIgnoresBrokenFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "draft.json")
+	if err := os.WriteFile(path, []byte("{ 坏掉的 json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := newDraftStore(path) // 不能 panic
+	if got := st.snapshot().Text; got != "" {
+		t.Errorf("坏文件应当成空草稿，实际 %q", got)
+	}
+}
+
+func TestDraftAPI(t *testing.T) {
+	st := newDraftStore(filepath.Join(t.TempDir(), "draft.json"))
+	h := makeDraftHandler(st)
+
+	// 同源写入
+	req := httptest.NewRequest(http.MethodPost, "/api/draft",
+		strings.NewReader(`{"text":"ABP-123","index":2,"src":"s"}`))
+	req.Header.Set("Origin", "http://"+req.Host)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("同源写入应 200，实际 %d：%s", rr.Code, rr.Body.String())
+	}
+	if got := st.snapshot(); got.Text != "ABP-123" || got.Index != 2 {
+		t.Errorf("草稿未保存：%+v", got)
+	}
+
+	// 读回
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/draft", nil))
+	var got draft
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Text != "ABP-123" {
+		t.Errorf("GET 返回不正确：%+v", got)
+	}
+
+	// 跨站拒绝
+	req = httptest.NewRequest(http.MethodPost, "/api/draft", strings.NewReader(`{"text":"evil"}`))
+	req.Header.Set("Origin", "http://evil.example")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("跨站写入应 403，实际 %d", rr.Code)
+	}
+	if st.snapshot().Text != "ABP-123" {
+		t.Error("被拒绝的请求不应改动草稿")
+	}
+
+	// 非法 JSON
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/draft", strings.NewReader(`{bad`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("非法 JSON 应 400，实际 %d", rr.Code)
+	}
+
+	// 方法不支持
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/api/draft", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("DELETE 应 405，实际 %d", rr.Code)
+	}
+}
+
+func TestBuildPageCarriesDraft(t *testing.T) {
+	page := buildPage(pageData{
+		Items:   nil,
+		Engines: []enginePayload{{Name: "X", Base: "http://a", Path: "/s", ProxyPort: 1}},
+		Draft:   draft{Text: "ABP-9\nSSIS-9", Index: 1},
+	})
+	if !strings.Contains(page, `"draft":{"text":"ABP-9\nSSIS-9","index":1}`) {
+		t.Errorf("引导数据里应带上草稿，实际页面片段：%s",
+			page[strings.Index(page, `"draft"`):strings.Index(page, `"draft"`)+80])
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 隐藏站点外壳的注入
 // ---------------------------------------------------------------------------
 

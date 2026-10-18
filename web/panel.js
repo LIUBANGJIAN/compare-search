@@ -151,7 +151,8 @@
 
         // ---------------- 引导数据 ----------------
         var boot = {
-            items: [], engines: [], hidePresets: [], origin: '', version: '', q: '', maxEngines: 8
+            items: [], engines: [], hidePresets: [], origin: '', version: '',
+            q: '', maxEngines: 8, draft: null
         };
         var bootEl = d.getElementById('bootstrap');
         if (bootEl && bootEl.textContent) {
@@ -165,6 +166,13 @@
                     if (typeof parsed.version === 'string') boot.version = parsed.version;
                     if (typeof parsed.q === 'string') boot.q = parsed.q;
                     if (typeof parsed.maxEngines === 'number') boot.maxEngines = parsed.maxEngines;
+                    if (parsed.draft && typeof parsed.draft === 'object') {
+                        boot.draft = {
+                            text: typeof parsed.draft.text === 'string' ? parsed.draft.text : '',
+                            index: typeof parsed.draft.index === 'number' ? parsed.draft.index : -1,
+                            src: typeof parsed.draft.src === 'string' ? parsed.draft.src : ''
+                        };
+                    }
                 }
             } catch (e) {
                 /* 引导数据损坏时退化为空列表，页面仍可用 */
@@ -203,32 +211,36 @@
             }
         }
 
-        // ---------------- 草稿：刷新页面不丢关键字 ----------------
-        var DRAFT_KEY = '_draft';
+        // ---------------- 关键字草稿：存服务端 ----------------
+        // 不用 localStorage：换浏览器、清缓存、隐私窗口都会掉。
+        // 存到服务端之后，关掉浏览器再打开还在；而且只有「清空」按钮会把它置空。
         var bootSrc = (boot.items || []).join('\n');
+        var lastPushed = null;
+        var draftTimer = null;
 
-        function saveDraft() {
-            writeStore(DRAFT_KEY, JSON.stringify({
-                text: els.kwInput.value,
-                src: bootSrc,
-                index: state.index
-            }));
+        function pushDraft() {
+            var payload = { text: els.kwInput.value, index: state.index, src: bootSrc };
+            var key = payload.text + '\u0000' + payload.index + '\u0000' + payload.src;
+            if (key === lastPushed) return;   // 内容没变就别重复写盘
+            lastPushed = key;
+            try {
+                var p = window.fetch('/api/draft', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (p && typeof p.catch === 'function') {
+                    p.catch(function () { lastPushed = null; });
+                }
+            } catch (e) {
+                lastPushed = null;
+            }
         }
 
-        // 草稿带上「番号来源」，换了 txt 文件时旧草稿自动作废，
-        // 否则会把新文件的内容盖掉 —— 那才是更难查的安静型故障。
-        function loadDraft() {
-            var raw = readStore(DRAFT_KEY, '');
-            if (!raw) return null;
-            try {
-                var dd = JSON.parse(raw);
-                if (!dd || typeof dd !== 'object') return null;
-                if (typeof dd.src !== 'string' || dd.src !== bootSrc) return null;
-                if (typeof dd.text !== 'string') return null;
-                return dd;
-            } catch (e) {
-                return null;
-            }
+        // 边打字边存，但别每敲一下就发一次请求
+        function pushDraftSoon() {
+            if (draftTimer) clearTimeout(draftTimer);
+            draftTimer = setTimeout(pushDraft, 800);
         }
 
         try {
@@ -469,7 +481,7 @@
             refreshListState();
             renderPager();
             scrollCurrentIntoView();
-            saveDraft();
+            pushDraftSoon();
         }
 
         function step(direction) {
@@ -501,7 +513,7 @@
             }
             disarmClear();
             setItems(list, true);
-            saveDraft();
+            pushDraftSoon();
         }
 
         // ---------------- 事件 ----------------
@@ -552,10 +564,12 @@
             state.viewed = Object.create(null);
             writeStore('_viewed', '{}');
             if (els.kwInput) els.kwInput.value = '';
-            writeStore(DRAFT_KEY, '');
             buildListNodes();
             renderPager();
             clearFrames();
+            // 清空是「显式动作」，立刻写服务端，不等防抖
+            lastPushed = null;
+            pushDraft();
         }
 
         els.clearBtn.addEventListener('click', function () {
@@ -570,11 +584,9 @@
             doClear();
         });
 
-        // 边打字边存草稿（防抖，别每敲一个字就写一次 localStorage）
-        var draftTimer = null;
+        // 边打字边存草稿（防抖在 pushDraftSoon 里）
         els.kwInput.addEventListener('input', function () {
-            if (draftTimer) clearTimeout(draftTimer);
-            draftTimer = setTimeout(saveDraft, 300);
+            pushDraftSoon();
         });
 
         // ---------------- 番号栏宽度与收起 ----------------
@@ -889,9 +901,9 @@
             els.kwInput.value = boot.q;
             submitSearch();
         } else {
-            var draft = loadDraft();
-            if (draft && draft.text.trim() !== '') {
-                // 刷新页面：把上次的输入、番号列表、正在看的那条都还原回来
+            var draft = boot.draft;
+            if (draft && draft.text.trim() !== '' && draft.src === bootSrc) {
+                // 关掉浏览器再打开也在这里还原：输入、番号列表、正在看的那条
                 els.kwInput.value = draft.text;
                 var restored = splitKeywords(draft.text);
                 setItems(restored, false);

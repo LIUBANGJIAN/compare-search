@@ -27,6 +27,7 @@ ENV LISTEN_HOST=0.0.0.0 \
     PROXY_PORT_BASE=18898 \
     COOKIE_FILE=/data/cookie_115.txt \
     CONFIG_FILE=/data/settings.json \
+    DRAFT_FILE=/data/draft.json \
     NO_BROWSER=1 \
     NO_PROMPT=1
 
